@@ -1,14 +1,7 @@
-import os, glob
+import os
+os.environ.setdefault("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
 
-if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
-    candidates = glob.glob("/nix/store/*-playwright-driver-*/share/playwright-browsers")
-    if candidates:
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = candidates[0]
-        os.environ.setdefault("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
-        print(f"Playwright browsers path → {candidates[0]}")
-    else:
-        print("No Nix playwright-driver path found; using downloaded browsers if present.")
-
+# then your other imports…
 import asyncio
 import time
 import random
@@ -20,6 +13,7 @@ from typing import Dict, List, Set, Optional, Tuple
 from urllib.parse import urljoin, quote_plus
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
+
 
 print("🚀 Starting RentRadar…")
 
