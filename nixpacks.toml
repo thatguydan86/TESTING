@@ -1,23 +1,13 @@
-# nixpacks.toml
-
 [phases.setup]
-# Include Python + pip AND the Playwright browsers + headless deps
 nixPkgs = [
-  "python311",
-  "python311Packages.pip",
-  "playwright-driver",
-  "glib", "nss", "nspr", "freetype", "fontconfig",
-  "pango", "cairo", "gdk-pixbuf", "gtk3", "mesa",
+  "bash","coreutils","which",
+  "glib","nss","nspr","freetype","fontconfig",
+  "pango","cairo","gdk-pixbuf","gtk3","mesa",
   "libxkbcommon",
-  "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext",
-  "xorg.libXfixes", "xorg.libXrandr", "xorg.libXrender", "xorg.libXi",
-  "xorg.libxcb", "xorg.libXcursor", "xorg.libxshmfence", "xorg.libXinerama"
+  "xorg.libX11","xorg.libXcomposite","xorg.libXdamage","xorg.libXext",
+  "xorg.libXfixes","xorg.libXrandr","xorg.libXrender","xorg.libXi",
+  "xorg.libxcb","xorg.libXcursor","xorg.libxshmfence","xorg.libXinerama"
 ]
 
-[variables]
-# Use the system Playwright browsers provided by playwright-driver
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
-PLAYWRIGHT_BROWSERS_PATH = "/usr/lib/playwright"
-
 [start]
-cmd = "python -u main.py"
+cmd = "echo '🔧 Installing Playwright browsers…' && python -m playwright install chromium firefox || true; python -u main.py"
