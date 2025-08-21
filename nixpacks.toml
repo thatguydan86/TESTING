@@ -1,10 +1,11 @@
-# nixpacks.toml  — only add system libs + start command.
-# Do NOT override the install phase; Nixpacks will detect Python from requirements.txt.
+# nixpacks.toml
 
 [phases.setup]
+# Include Python + pip AND the Playwright browsers + headless deps
 nixPkgs = [
-  "bash", "coreutils", "which",
-  "playwright-driver",        # provides Chromium/Firefox/WebKit + glue
+  "python311",
+  "python311Packages.pip",
+  "playwright-driver",
   "glib", "nss", "nspr", "freetype", "fontconfig",
   "pango", "cairo", "gdk-pixbuf", "gtk3", "mesa",
   "libxkbcommon",
@@ -14,6 +15,7 @@ nixPkgs = [
 ]
 
 [variables]
+# Use the system Playwright browsers provided by playwright-driver
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
 PLAYWRIGHT_BROWSERS_PATH = "/usr/lib/playwright"
 
