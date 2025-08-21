@@ -1,13 +1,20 @@
+# nixpacks.toml
+
 [phases.setup]
+# Install Python + pip AND the headless browser libs Playwright needs
 nixPkgs = [
-  "bash","coreutils","which",
-  "glib","nss","nspr","freetype","fontconfig",
-  "pango","cairo","gdk-pixbuf","gtk3","mesa",
+  "python311",
+  "python311Packages.pip",
+  "bash", "coreutils", "which",
+  "glib", "nss", "nspr", "freetype", "fontconfig",
+  "pango", "cairo", "gdk-pixbuf", "gtk3", "mesa",
   "libxkbcommon",
-  "xorg.libX11","xorg.libXcomposite","xorg.libXdamage","xorg.libXext",
-  "xorg.libXfixes","xorg.libXrandr","xorg.libXrender","xorg.libXi",
-  "xorg.libxcb","xorg.libXcursor","xorg.libxshmfence","xorg.libXinerama"
+  "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext",
+  "xorg.libXfixes", "xorg.libXrandr", "xorg.libXrender", "xorg.libXi",
+  "xorg.libxcb", "xorg.libXcursor", "xorg.libxshmfence", "xorg.libXinerama"
 ]
 
 [start]
+# Let Playwright download browsers at startup (first run may take a bit),
+# then run your scraper.
 cmd = "echo '🔧 Installing Playwright browsers…' && python -m playwright install chromium firefox || true; python -u main.py"
