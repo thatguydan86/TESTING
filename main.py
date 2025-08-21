@@ -1,25 +1,13 @@
 import os, glob
 
-def _wire_playwright_browsers_path():
-    # If already set via env, keep it
-    if os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
-        return
-    # Find Nix's playwright-driver browsers dir
-    candidates = [
-        "/usr/lib/playwright",  # some distros use this, quick check
-        *glob.glob("/nix/store/*-playwright-driver-*/share/playwright-browsers"),
-        *glob.glob("/nix/store/*-playwright-*/share/playwright-browsers"),
-    ]
-    for p in candidates:
-        if os.path.isdir(p):
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = p
-            os.environ.setdefault("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
-            print(f"Playwright browsers path → {p}")
-            return
-    # Fallback: allow download if no system path found
-    print("Playwright browsers path not found; will rely on downloaded browsers.")
-
-_wire_playwright_browsers_path()
+if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+    candidates = glob.glob("/nix/store/*-playwright-driver-*/share/playwright-browsers")
+    if candidates:
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = candidates[0]
+        os.environ.setdefault("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+        print(f"Playwright browsers path → {candidates[0]}")
+    else:
+        print("No Nix playwright-driver path found; using downloaded browsers if present.")
 
 import asyncio
 import time
