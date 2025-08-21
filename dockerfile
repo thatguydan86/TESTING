@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM mcr.microsoft.com/playwright/python:v1.45.0-jammy
 
 WORKDIR /app
 
@@ -7,5 +7,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Force Python to run in unbuffered mode so logs flush immediately
+ENV PYTHONUNBUFFERED=1 TZ=Europe/London
 CMD ["python", "-u", "main.py"]
