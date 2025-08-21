@@ -2,7 +2,7 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# System deps for Playwright browsers
+# System deps for Playwright browsers (Chromium/Firefox)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget ca-certificates fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
     libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libfreetype6 \
@@ -12,15 +12,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 libxshmfence1 libdrm2 libgbm1 libxkbcommon0 fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download Playwright browsers (install both Chromium & Firefox so our fallback works)
-RUN python -m playwright install --with-deps chromium firefox
-
-# App code
+# Copy app
 COPY . .
 
+# Entrypoint does the 'playwright install' at startup so browsers are guaranteed present
+RUN chmod +x /app/start.sh
+
 ENV PYTHONUNBUFFERED=1 TZ=Europe/London
-CMD ["python", "-u", "main.py"]
+CMD ["/app/start.sh"]
