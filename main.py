@@ -1,4 +1,6 @@
 import os
+os.environ.setdefault("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/usr/lib/playwright")
 import asyncio
 import time
 import random
