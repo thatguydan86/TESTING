@@ -7,8 +7,9 @@ import hashlib
 import difflib
 import requests
 from typing import Dict, List, Set, Optional, Tuple
-from urllib.parse import urlencode, urljoin, quote_plus
+from urllib.parse import urljoin, quote_plus
 from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
 print("🚀 Starting RentRadar…")
 
@@ -27,29 +28,32 @@ SOURCES_ORDER = [s.strip().lower() for s in os.getenv(
     "rightmove,zoopla,onthemarket,spareroom"
 ).split(",") if s.strip()]
 
-# Rightmove location IDs (as you had)
+# Rightmove location IDs (your originals)
 LOCATION_IDS: Dict[str, str] = {
     "Lincoln": "REGION^804",
     "Wirral": "REGION^93365",
     "Bridgwater": "REGION^212",
 }
 
-# Optional: explicit search URLs per source & area (recommended for Zoopla/OTM/SpareRoom)
-# Paste your exact filtered links here. I've added your SpareRoom whole-property link.
+# Optional: explicit search URLs per source (recommended for Zoopla/OTM/SpareRoom)
+# Add your filtered links here. I’ve included your SpareRoom whole-property link.
 SEARCH_URLS: Dict[str, Dict[str, str]] = {
     # "zoopla": {
-    #     "Liverpool": "https://www.zoopla.co.uk/to-rent/property/liverpool/?beds_min=3&beds_max=4&price_min=800&price_max=1500",
+    #     "Lincoln":    "https://www.zoopla.co.uk/to-rent/property/lincoln/?beds_min=3&beds_max=4&price_min=800&price_max=1500",
+    #     "Wirral":     "https://www.zoopla.co.uk/to-rent/property/wirral/?beds_min=3&beds_max=4&price_min=800&price_max=1500",
+    #     "Bridgwater": "https://www.zoopla.co.uk/to-rent/property/bridgwater/?beds_min=3&beds_max=4&price_min=800&price_max=1500",
     # },
     # "onthemarket": {
-    #     "Liverpool": "https://www.onthemarket.com/to-rent/property/liverpool/?min-bedrooms=3&max-bedrooms=4&price-from=800&price-to=1500",
+    #     "Lincoln":    "https://www.onthemarket.com/to-rent/property/lincoln/?min-bedrooms=3&max-bedrooms=4&price-from=800&price-to=1500",
+    #     "Wirral":     "https://www.onthemarket.com/to-rent/property/wirral/?min-bedrooms=3&max-bedrooms=4&price-from=800&price-to=1500",
+    #     "Bridgwater": "https://www.onthemarket.com/to-rent/property/bridgwater/?min-bedrooms=3&max-bedrooms=4&price-from=800&price-to=1500",
     # },
     "spareroom": {
-        # Whole property (your provided search_id)
         "Liverpool": "https://www.spareroom.co.uk/flatshare/?search_id=1381621815&mode=list",
     }
 }
 
-# Deal filters / economics
+# Economics & filters
 MIN_BEDS = int(os.getenv("MIN_BEDS", "3"))
 MAX_BEDS = int(os.getenv("MAX_BEDS", "4"))
 MIN_BATHS = int(os.getenv("MIN_BATHS", "1"))
@@ -57,34 +61,30 @@ MIN_RENT = int(os.getenv("MIN_RENT", "800"))
 GOOD_PROFIT_TARGET = int(os.getenv("GOOD_PROFIT_TARGET", "1300"))
 BOOKING_FEE_PCT = float(os.getenv("BOOKING_FEE_PCT", "0.15"))
 
-# Max rent caps depending on bedrooms
 MAX_RENTS: Dict[int, int] = {3: 1300, 4: 1500}
 
-# Bills per area & bedroom count (average utilities + council tax)
 BILLS_PER_AREA: Dict[str, Dict[int, int]] = {
     "Lincoln": {3: 520, 4: 580},
     "Wirral": {3: 540, 4: 620},
     "Bridgwater": {3: 530, 4: 600},
 }
 
-# Nightly ADR per area & bedroom count
 NIGHTLY_RATES: Dict[str, Dict[int, int]] = {
     "Lincoln": {3: 150, 4: 178},
     "Wirral": {3: 165, 4: 196},
     "Bridgwater": {3: 170, 4: 205},
 }
 
-# Occupancy rates per area & bedroom count
 OCCUPANCY: Dict[str, Dict[int, float]] = {
     "Lincoln": {3: 0.65, 4: 0.66},
     "Wirral": {3: 0.67, 4: 0.68},
     "Bridgwater": {3: 0.66, 4: 0.67},
 }
 
-# Request settings
+# Requests session & pacing
 REQUEST_TIMEOUT = 30
 RETRY_ATTEMPTS = 3
-REQUEST_COOLDOWN_SEC = (1.0, 2.0)  # random sleep between requests
+REQUEST_COOLDOWN_SEC = (1.0, 2.0)
 SESSION = requests.Session()
 
 UA_POOL = [
@@ -106,6 +106,9 @@ def _headers() -> Dict[str, str]:
 def _sleep():
     time.sleep(random.uniform(*REQUEST_COOLDOWN_SEC))
 
+# ======== Debug flags print ========
+print(f"Flags → ZOOPLA={ENABLE_ZOOPLA}, OTM={ENABLE_OTM}, SPAREROOM={ENABLE_SPAREROOM}, ORDER={SOURCES_ORDER}")
+
 # ========= Economics helpers =========
 def monthly_net_from_adr(adr: float, occ: float) -> float:
     gross = adr * occ * 30
@@ -122,7 +125,7 @@ def calculate_profits(rent_pcm: int, area: str, beds: int):
 
     return {
         "night_rate": nightly_rate,
-        "occ_rate": int(round(occ_rate * 100)),  # % occupancy
+        "occ_rate": int(round(occ_rate * 100)),
         "total_bills": total_bills,
         "profit_50": profit(0.5),
         "profit_70": profit(0.7),
@@ -246,7 +249,7 @@ def is_cross_duplicate(listing: Dict, registry: Dict[tuple, Dict]) -> Tuple[bool
             return True, v, k
     return False, None, key
 
-# ========= Generic HTML fetcher =========
+# ========= Generic HTML fetcher (requests) =========
 def get_soup(url: str) -> Optional[BeautifulSoup]:
     for _ in range(RETRY_ATTEMPTS):
         try:
@@ -343,23 +346,36 @@ def filter_rightmove(properties: List[Dict], area: str) -> List[Dict]:
             continue
     return results
 
-# ========= Zoopla =========
+# ========= Zoopla (Playwright) =========
 def build_zoopla_urls() -> Dict[str, str]:
-    # Prefer explicit SEARCH_URLS if provided; else build a generic query by area name
     cfg = SEARCH_URLS.get("zoopla", {})
     if cfg:
         return cfg
-    # fallback construction (less precise than explicit URLs)
-    return {area: f"https://www.zoopla.co.uk/to-rent/property/?q={quote_plus(area)}" for area in LOCATION_IDS.keys()}
+    # Fallback generic searches (works with Playwright); replace with your filtered URLs when ready
+    return {area: f"https://www.zoopla.co.uk/to-rent/property/{area.lower().replace(' ', '-')}/"
+            for area in LOCATION_IDS.keys()}
 
-def fetch_zoopla_from_url(url: str, area: str) -> List[Dict]:
-    soup = get_soup(url)
-    if not soup:
-        return []
+async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     listings: List[Dict] = []
-    anchors = soup.select("a[data-testid*='listing'], a[href*='/to-rent/details/']")
+    page = await context.new_page()
+    await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
+    # Speed up: block images/fonts
+    async def route_handler(route):
+        if any(ext in route.request.url for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf")):
+            await route.abort()
+        else:
+            await route.continue_()
+    await page.route("**/*", route_handler)
+
+    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(1200)  # small think-time
+
+    html = await page.content()
+    soup = BeautifulSoup(html, "lxml")
+    anchors = soup.select("a[href*='/to-rent/details/']")
     seen = set()
-    for a in anchors[:40]:
+
+    for a in anchors[:50]:
         href = a.get("href") or ""
         if "/to-rent/details" not in href:
             continue
@@ -370,32 +386,28 @@ def fetch_zoopla_from_url(url: str, area: str) -> List[Dict]:
 
         card_text = a.get_text(" ", strip=True) or ""
         parent = a.find_parent()
-        price_txt = ""
-        address = ""
+        price_txt, address = "", ""
         if parent:
-            price_el = parent.find(string=re.compile(r"£\s*\d"))
-            if price_el:
-                price_txt = str(price_el)
+            # Price within parent text usually
+            parent_text = parent.get_text(" ", strip=True).lower()
+            m_price = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per week|per month)", parent_text)
+            if m_price:
+                price_txt = m_price.group(0)
             addr_el = parent.find(string=re.compile(r"[A-Za-z].*,"))
             if addr_el:
                 address = str(addr_el).strip()
 
         amt, freq = parse_price_text(price_txt)
         rent_pcm = to_pcm(amt, freq)
-
-        beds = None
         mb = re.search(r"(\d+)\s*bed", card_text.lower())
-        if mb:
-            beds = int(mb.group(1))
+        beds = int(mb.group(1)) if mb else MIN_BEDS
 
-        if beds is not None and (beds < MIN_BEDS or beds > MAX_BEDS):
+        if beds < MIN_BEDS or beds > MAX_BEDS:
             continue
         if rent_pcm is not None and rent_pcm < MIN_RENT:
             continue
-
-        beds = beds if beds is not None else MIN_BEDS
-        baths = max(MIN_BATHS, 1)
         rent_pcm = rent_pcm if rent_pcm is not None else MIN_RENT
+        baths = max(MIN_BATHS, 1)
 
         p = calculate_profits(rent_pcm, area, beds)
         p70 = p["profit_70"]
@@ -422,14 +434,16 @@ def fetch_zoopla_from_url(url: str, area: str) -> List[Dict]:
             "score10": score10,
             "rag": rag,
         })
+
+    await page.close()
     return listings
 
-# ========= OnTheMarket =========
+# ========= OnTheMarket (requests) =========
 def build_otm_urls() -> Dict[str, str]:
     cfg = SEARCH_URLS.get("onthemarket", {})
     if cfg:
         return cfg
-    return {area: f"https://www.onthemarket.com/to-rent/property/{quote_plus(area.lower().replace(' ', '-'))}/"
+    return {area: f"https://www.onthemarket.com/to-rent/property/{area.lower().replace(' ', '-')}/"
             for area in LOCATION_IDS.keys()}
 
 def fetch_otm_from_url(url: str, area: str) -> List[Dict]:
@@ -438,7 +452,7 @@ def fetch_otm_from_url(url: str, area: str) -> List[Dict]:
         return []
     listings: List[Dict] = []
     cards = soup.select("[data-testid*=propertyCard], article, li")
-    for card in cards[:40]:
+    for card in cards[:50]:
         a = card.find("a", href=re.compile(r"/details/|/to-rent/property/"))
         if not a:
             continue
@@ -446,7 +460,6 @@ def fetch_otm_from_url(url: str, area: str) -> List[Dict]:
         abs_url = href if href.startswith("http") else urljoin("https://www.onthemarket.com", href)
 
         text = card.get_text(" ", strip=True).lower()
-        title = (a.get_text(" ", strip=True) or "").strip()
         price_el = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per week|per month)", text)
         price_txt = price_el.group(0) if price_el else ""
         amt, freq = parse_price_text(price_txt)
@@ -456,7 +469,6 @@ def fetch_otm_from_url(url: str, area: str) -> List[Dict]:
         mb = re.search(r"(\d+)\s*bed", text)
         if mb:
             beds = int(mb.group(1))
-
         address = ""
         addr_m = re.search(r"[A-Za-z].*,.*", card.get_text("\n", strip=True))
         if addr_m:
@@ -498,12 +510,12 @@ def fetch_otm_from_url(url: str, area: str) -> List[Dict]:
         })
     return listings
 
-# ========= SpareRoom (whole property via your saved search URL) =========
+# ========= SpareRoom (requests; whole property via saved search) =========
 def build_spareroom_urls() -> Dict[str, str]:
     cfg = SEARCH_URLS.get("spareroom", {})
     if cfg:
         return cfg
-    # If no explicit URLs, fall back to keyword search (but this usually returns HMOs; not recommended)
+    # Fallback (not ideal): keyword + whole-property filter
     return {area: f"https://www.spareroom.co.uk/flatshare/?search_type=offered&property_type=property&location={quote_plus(area)}"
             for area in LOCATION_IDS.keys()}
 
@@ -513,7 +525,7 @@ def fetch_spareroom_from_url(url: str, area: str) -> List[Dict]:
         return []
     listings: List[Dict] = []
     cards = soup.select("li.listing-result, .panel-listing-result, .results_content .listing")
-    for c in cards[:30]:
+    for c in cards[:40]:
         a = c.find("a", href=True)
         if not a:
             continue
@@ -521,21 +533,17 @@ def fetch_spareroom_from_url(url: str, area: str) -> List[Dict]:
         abs_url = href if href.startswith("http") else urljoin("https://www.spareroom.co.uk", href)
 
         text = c.get_text(" ", strip=True)
-        title = a.get_text(" ", strip=True)
-
         mprice = re.search(r"£\s*\d[\d,]*\s*(pw|pcm|per week|per month)", text.lower())
         price_txt = mprice.group(0) if mprice else ""
         amt, freq = parse_price_text(price_txt)
         rent_pcm = to_pcm(amt, freq)
 
-        mb = re.search(r"(\d+)\s*bed", (title + " " + text).lower())
+        mb = re.search(r"(\d+)\s*bed", text.lower())
         if not mb:
-            # Likely a room/HMO without explicit beds → skip
-            continue
+            continue  # usually room/HMO without clear beds
         beds = int(mb.group(1))
         if beds < MIN_BEDS or beds > MAX_BEDS:
             continue
-
         if rent_pcm is not None and rent_pcm < MIN_RENT:
             continue
 
@@ -574,106 +582,110 @@ def fetch_spareroom_from_url(url: str, area: str) -> List[Dict]:
         })
     return listings
 
-# ========= Orchestrator =========
-def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> List[Dict]:
+# ========= Orchestrator (async) =========
+async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> List[Dict]:
     new_listings: List[Dict] = []
 
-    for s in SOURCES_ORDER:
-        if s == "rightmove" and ENABLE_RIGHTMOVE:
-            for area, loc_id in LOCATION_IDS.items():
-                print(f"\n📍 [Rightmove] {area}…")
-                raw = fetch_rightmove(loc_id)
-                filt = filter_rightmove(raw, area)
-                for listing in filt:
-                    # Cross-site dedupe
-                    is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
-                    if is_dup:
-                        preferred = choose_preferred(existing, listing)
-                        cross_registry[key] = preferred
-                        if preferred is existing:
-                            continue
-                    else:
-                        cross_registry[key] = listing
-
-                    # Per-run dedupe by ID
-                    if listing["id"] in seen_ids:
+    # ---- Rightmove (requests) ----
+    if "rightmove" in SOURCES_ORDER and ENABLE_RIGHTMOVE:
+        for area, loc_id in LOCATION_IDS.items():
+            print(f"\n📍 [Rightmove] {area}…")
+            raw = fetch_rightmove(loc_id)
+            for listing in filter_rightmove(raw, area):
+                is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
+                if is_dup:
+                    preferred = choose_preferred(existing, listing)
+                    cross_registry[key] = preferred
+                    if preferred is existing:
                         continue
-                    seen_ids.add(listing["id"])
+                else:
+                    cross_registry[key] = listing
+                if listing["id"] in seen_ids:
+                    continue
+                seen_ids.add(listing["id"])
+                new_listings.append(listing)
+            time.sleep(1.0)
 
-                    new_listings.append(listing)
-                _sleep()
-
-        elif s == "zoopla" and ENABLE_ZOOPLA:
-            urls = build_zoopla_urls()
-            for area, url in urls.items():
-                print(f"\n📍 [Zoopla] {area}…")
-                for listing in fetch_zoopla_from_url(url, area):
-                    is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
-                    if is_dup:
-                        preferred = choose_preferred(existing, listing)
-                        cross_registry[key] = preferred
-                        if preferred is existing:
-                            continue
-                    else:
-                        cross_registry[key] = listing
-
-                    if listing["id"] in seen_ids:
+    # ---- Zoopla (Playwright) ----
+    if "zoopla" in SOURCES_ORDER and ENABLE_ZOOPLA:
+        print("\n🧭 Launching Playwright for Zoopla…")
+        pw = await async_playwright().start()
+        # Firefox often hits fewer bot checks
+        browser = await pw.firefox.launch(headless=True)
+        context = await browser.new_context(locale="en-GB")
+        urls = build_zoopla_urls()
+        for area, url in urls.items():
+            print(f"\n📍 [Zoopla] {area}…")
+            listings = await fetch_zoopla_playwright(context, url, area)
+            for listing in listings:
+                is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
+                if is_dup:
+                    preferred = choose_preferred(existing, listing)
+                    cross_registry[key] = preferred
+                    if preferred is existing:
                         continue
-                    seen_ids.add(listing["id"])
-                    new_listings.append(listing)
-                _sleep()
+                else:
+                    cross_registry[key] = listing
+                if listing["id"] in seen_ids:
+                    continue
+                seen_ids.add(listing["id"])
+                new_listings.append(listing)
+            await asyncio.sleep(1.0)
+        await browser.close()
+        await pw.stop()
 
-        elif s in ("onthemarket", "otm") and ENABLE_OTM:
-            urls = build_otm_urls()
-            for area, url in urls.items():
-                print(f"\n📍 [OnTheMarket] {area}…")
-                for listing in fetch_otm_from_url(url, area):
-                    is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
-                    if is_dup:
-                        preferred = choose_preferred(existing, listing)
-                        cross_registry[key] = preferred
-                        if preferred is existing:
-                            continue
-                    else:
-                        cross_registry[key] = listing
-
-                    if listing["id"] in seen_ids:
+    # ---- OnTheMarket (requests) ----
+    if ("onthemarket" in SOURCES_ORDER or "otm" in SOURCES_ORDER) and ENABLE_OTM:
+        urls = build_otm_urls()
+        for area, url in urls.items():
+            print(f"\n📍 [OnTheMarket] {area}…")
+            for listing in fetch_otm_from_url(url, area):
+                is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
+                if is_dup:
+                    preferred = choose_preferred(existing, listing)
+                    cross_registry[key] = preferred
+                    if preferred is existing:
                         continue
-                    seen_ids.add(listing["id"])
-                    new_listings.append(listing)
-                _sleep()
+                else:
+                    cross_registry[key] = listing
+                if listing["id"] in seen_ids:
+                    continue
+                seen_ids.add(listing["id"])
+                new_listings.append(listing)
+            time.sleep(1.0)
 
-        elif s == "spareroom" and ENABLE_SPAREROOM:
-            urls = build_spareroom_urls()
-            for area, url in urls.items():
-                print(f"\n📍 [SpareRoom] {area}…")
-                for listing in fetch_spareroom_from_url(url, area):
-                    is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
-                    if is_dup:
-                        preferred = choose_preferred(existing, listing)
-                        cross_registry[key] = preferred
-                        if preferred is existing:
-                            continue
-                    else:
-                        cross_registry[key] = listing
-
-                    if listing["id"] in seen_ids:
+    # ---- SpareRoom (requests) ----
+    if "spareroom" in SOURCES_ORDER and ENABLE_SPAREROOM:
+        urls = build_spareroom_urls()
+        for area, url in urls.items():
+            print(f"\n📍 [SpareRoom] {area}…")
+            for listing in fetch_spareroom_from_url(url, area):
+                is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
+                if is_dup:
+                    preferred = choose_preferred(existing, listing)
+                    cross_registry[key] = preferred
+                    if preferred is existing:
                         continue
-                    seen_ids.add(listing["id"])
-                    new_listings.append(listing)
-                _sleep()
+                else:
+                    cross_registry[key] = listing
+                if listing["id"] in seen_ids:
+                    continue
+                seen_ids.add(listing["id"])
+                new_listings.append(listing)
+            time.sleep(1.0)
 
     return new_listings
 
+# ========= Main loop =========
 async def main() -> None:
     print("🚀 Scraper started!")
-    seen_ids: Set[str] = set()          # per-process, prevents re-sending same ID
-    cross_seen: Dict[tuple, Dict] = {}  # cross-site dedupe registry (address keyed)
+    seen_ids: Set[str] = set()          # prevents re-sending same ID in this process
+    cross_seen: Dict[tuple, Dict] = {}  # cross-site dedupe registry
 
     while True:
         try:
             print(f"\n⏰ New scrape at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-            new_listings = run_once(seen_ids, cross_seen)
+            new_listings = await run_once(seen_ids, cross_seen)
 
             if not new_listings:
                 print("ℹ️ No new listings this run.")
