@@ -1,16 +1,12 @@
 # nixpacks.toml
 
 [phases.setup]
-# Python + pip + Playwright system browsers + all headless deps
 nixPkgs = [
   "python311",
   "python311Packages.pip",
 
-  # Browsers provided by Nix (Chromium/Firefox/WebKit with proper RPATH)
-  "playwright-driver",
-
-  # Deps Playwright checks for (maps the apt list to Nix pkgs)
-  "glib", "nss", "nspr", "dbus", "at-spi2-core", "atk", "atkmm", "atk",
+  # Headless browser deps
+  "glib", "nss", "nspr", "dbus", "at-spi2-core", "atk",
   "cups", "alsa-lib",
   "freetype", "fontconfig", "pango", "cairo", "gdk-pixbuf", "gtk3",
   "libdrm", "mesa", "mesa.drivers", "libxkbcommon",
@@ -20,5 +16,7 @@ nixPkgs = [
 ]
 
 [start]
-# Do NOT auto-download browsers; use the Nix-provided ones.
-cmd = "python -u main.py"
+# 1) Download browsers into /root/.cache/ms-playwright (cached across restarts)
+# 2) Show what got installed (debug)
+# 3) Run your scraper
+cmd = "echo '🔧 Installing Playwright browsers…' && python -m playwright install chromium firefox || true; ls -lah /root/.cache/ms-playwright || true; python -u main.py"
