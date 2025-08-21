@@ -1,16 +1,11 @@
 # nixpacks.toml
 
 [phases.setup]
-# Python + pip + *system* Playwright browsers + all headless deps
 nixPkgs = [
-  "python311",
-  "python311Packages.pip",
-
-  # <-- This provides Chromium/Firefox/WebKit built for Nix with proper RPATHs
-  "playwright-driver",
-
-  # Deps Playwright expects (Nix equivalents of the apt list)
-  "glib", "nss", "nspr", "dbus", "at-spi2-core", "at-spi2-atk", "atk",
+  "python311", "python311Packages.pip",
+  "playwright-driver",                 # <-- NIX browsers (Chromium/Firefox/WebKit)
+  # headless deps
+  "glib", "nss", "nspr", "dbus", "at-spi2-core", "atk",
   "cups", "alsa-lib",
   "freetype", "fontconfig", "pango", "cairo", "gdk-pixbuf", "gtk3",
   "libdrm", "mesa", "mesa.drivers", "libgbm", "libxkbcommon",
@@ -20,6 +15,5 @@ nixPkgs = [
 ]
 
 [start]
-# Use the Nix-provided browsers; don't run `playwright install` anymore.
-# (We'll export PLAYWRIGHT_BROWSERS_PATH to the correct Nix store dir.)
+# Export the Nix browsers path so Playwright uses them (no downloads needed)
 cmd = "export PLAYWRIGHT_BROWSERS_PATH=$(ls -d /nix/store/*-playwright-driver-*/share/playwright-browsers 2>/dev/null | head -n1); echo \"Using Nix browsers at: $PLAYWRIGHT_BROWSERS_PATH\"; python -u main.py"
