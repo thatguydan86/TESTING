@@ -1,3 +1,4 @@
+# Has Firefox/Chromium/WebKit + all system deps preinstalled
 FROM mcr.microsoft.com/playwright/python:v1.45.0-jammy
 
 WORKDIR /app
