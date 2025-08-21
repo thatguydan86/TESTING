@@ -1,0 +1,19 @@
+# nixpacks.toml
+[phases.setup]
+# System packages needed for headless browsers + Playwright’s prebuilt browsers
+nixPkgs = [
+  "bash", "coreutils", "which",
+  "playwright-driver",        # <-- provides Chromium/Firefox/WebKit + glue
+  "glib", "nss", "nspr", "freetype", "fontconfig",
+  "pango", "cairo", "gdk-pixbuf", "gtk3", "mesa",
+  "libxkbcommon",
+  "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext",
+  "xorg.libXfixes", "xorg.libXrandr", "xorg.libXrender", "xorg.libXi",
+  "xorg.libxcb", "xorg.libXcursor", "xorg.libxshmfence", "xorg.libXinerama"
+]
+
+[phases.install]
+cmds = ["pip install --no-cache-dir -r requirements.txt"]
+
+[start]
+cmd = "python -u main.py"
