@@ -359,16 +359,17 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     listings: List[Dict] = []
     page = await context.new_page()
     await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
-    # Speed up: block images/fonts
+
+    # Block heavy assets
     async def route_handler(route):
-        if any(ext in route.request.url for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf")):
+        if any(ext in route.request.url for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf", ".otf")):
             await route.abort()
         else:
             await route.continue_()
     await page.route("**/*", route_handler)
 
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(1200)  # small think-time
+    await page.wait_for_timeout(1200)  # small think time
 
     html = await page.content()
     soup = BeautifulSoup(html, "lxml")
@@ -388,7 +389,6 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
         parent = a.find_parent()
         price_txt, address = "", ""
         if parent:
-            # Price within parent text usually
             parent_text = parent.get_text(" ", strip=True).lower()
             m_price = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per week|per month)", parent_text)
             if m_price:
@@ -606,19 +606,19 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
                 new_listings.append(listing)
             time.sleep(1.0)
 
-    # ---- Zoopla (Playwright) ----
+    # ---- Zoopla (Playwright with Firefox→Chromium fallback) ----
     if "zoopla" in SOURCES_ORDER and ENABLE_ZOOPLA:
-       print("\n🧭 Launching Playwright for Zoopla…")
-pw = await async_playwright().start()
-browser = None
-try:
-    browser = await pw.firefox.launch(headless=True)
-    print("Zoopla via Firefox")
-except Exception as e:
-    print(f"Firefox launch failed ({e}); falling back to Chromium…")
-    browser = await pw.chromium.launch(headless=True)
-context = await browser.new_context(locale="en-GB")
-
+        print("\n🧭 Launching Playwright for Zoopla…")
+        pw = await async_playwright().start()
+        browser = None
+        try:
+            browser = await pw.firefox.launch(headless=True)
+            print("Zoopla via Firefox")
+        except Exception as e:
+            print(f"Firefox launch failed ({e}); falling back to Chromium…")
+            browser = await pw.chromium.launch(headless=True)
+            print("Zoopla via Chromium")
+        context = await browser.new_context(locale="en-GB")
         urls = build_zoopla_urls()
         for area, url in urls.items():
             print(f"\n📍 [Zoopla] {area}…")
