@@ -608,11 +608,17 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
 
     # ---- Zoopla (Playwright) ----
     if "zoopla" in SOURCES_ORDER and ENABLE_ZOOPLA:
-        print("\n🧭 Launching Playwright for Zoopla…")
-        pw = await async_playwright().start()
-        # Firefox often hits fewer bot checks
-        browser = await pw.firefox.launch(headless=True)
-        context = await browser.new_context(locale="en-GB")
+       print("\n🧭 Launching Playwright for Zoopla…")
+pw = await async_playwright().start()
+browser = None
+try:
+    browser = await pw.firefox.launch(headless=True)
+    print("Zoopla via Firefox")
+except Exception as e:
+    print(f"Firefox launch failed ({e}); falling back to Chromium…")
+    browser = await pw.chromium.launch(headless=True)
+context = await browser.new_context(locale="en-GB")
+
         urls = build_zoopla_urls()
         for area, url in urls.items():
             print(f"\n📍 [Zoopla] {area}…")
