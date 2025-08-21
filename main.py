@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 print("🚀 Starting RentRadar…")
 
 # ========= Config =========
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://hook.eu2.make.com/yhupboymwhht7vggrp27wlqjs4sn4886")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://hook.eu2.make.com/6k1jjsv0khxbqbfplzv5ibt4d1wh3dwj")
 
 # Enable/disable sources (deterministic, no round robin)
 ENABLE_RIGHTMOVE = os.getenv("ENABLE_RIGHTMOVE", "true").lower() == "true"
