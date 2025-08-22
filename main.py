@@ -39,17 +39,24 @@ LOCATION_IDS: Dict[str, str] = {
     "Bridgwater": "REGION^212",
 }
 
-# Optional hardcoded search URLs (we still prefer env JSON for Zoopla; see below)
+# Optional hardcoded search URLs (we still support SpareRoom saved search here)
 SEARCH_URLS: Dict[str, Dict[str, List[str]]] = {
-    # "zoopla": {
-    #   "Lincoln": [ "...3-bed URL...", "...4-bed URL..." ],
-    #   "Wirral": [ ... ],
-    #   "Bridgwater": [ ... ],
-    # },
     "spareroom": {
-        # whole-property saved search you gave earlier
         "Liverpool": ["https://www.spareroom.co.uk/flatshare/?search_id=1381621815&mode=list"],
     }
+}
+
+# >>> Option B: HARDCODED ZOOPLA URLS (area keys must match LOCATION_IDS) <<<
+SEARCH_URLS["zoopla"] = {
+    "Lincoln": [
+        "https://www.zoopla.co.uk/to-rent/houses/lincoln/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&price_frequency=per_month&price_max=1250&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Lincoln%2C%20Lincolnshire&search_source=to-rent"
+    ],
+    "Wirral": [
+        "https://www.zoopla.co.uk/to-rent/houses/merseyside/wirral/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&price_frequency=per_month&price_max=1250&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Wirral%2C%20Merseyside&search_source=to-rent"
+    ],
+    "Bridgwater": [
+        "https://www.zoopla.co.uk/to-rent/houses/schools/bridgewater-academy/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Bridgewater%20Academy%2C%20Somerset%2C%20TA6&search_source=to-rent"
+    ]
 }
 
 # Economics & filters
@@ -347,28 +354,16 @@ def filter_rightmove(properties: List[Dict], area: str) -> List[Dict]:
 
 # ========= Zoopla helpers =========
 def zoopla_area_url_groups() -> Dict[str, List[str]]:
-    """Prefer env var ZOOPLA_URLS_JSON={ area: [url, url2] }.
-       Fallback to SEARCH_URLS['zoopla'] if provided. Else, build generic area URLs."""
-    env_json = os.getenv("ZOOPLA_URLS_JSON")
-    if env_json:
-        try:
-            data = json.loads(env_json)
-            # ensure values are lists
-            clean = {area: (urls if isinstance(urls, list) else [urls]) for area, urls in data.items()}
-            return clean
-        except Exception as e:
-            print(f"⚠️ ZOOPLA_URLS_JSON parse error: {e}")
+    """Use hardcoded SEARCH_URLS['zoopla'] if present; else generic area pages."""
     cfg = SEARCH_URLS.get("zoopla", {})
     if cfg:
         return {k: (v if isinstance(v, list) else [v]) for k, v in cfg.items()}
-    # generic fallbacks (broad search pages)
+    # generic fallbacks
     return {area: [f"https://www.zoopla.co.uk/to-rent/property/{area.lower().replace(' ', '-')}/"]
             for area in LOCATION_IDS.keys()}
 
 async def zoopla_launch_browser(pw):
-    """Launch Chromium from system (Nix) path if available; else default chromium.
-       Add container-safe flags."""
-    # prefer system Chromium on Railway Nixpacks
+    """Launch Chromium from system (Nix) path if available; else bundled."""
     system_chromium = (
         next(iter(glob.glob("/root/.nix-profile/bin/chromium")), None) or
         next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium")), None) or
@@ -378,7 +373,6 @@ async def zoopla_launch_browser(pw):
     if system_chromium:
         print(f"Using system Chromium: {system_chromium}")
         return await pw.chromium.launch(headless=True, executable_path=system_chromium, args=args)
-    # fall back to bundled Chromium (should be downloaded by Dockerfile entry)
     print("Using bundled Chromium")
     return await pw.chromium.launch(headless=True, args=args)
 
@@ -392,7 +386,6 @@ async def zoopla_new_context(browser):
 async def zoopla_block_assets(page):
     async def route_handler(route):
         r = route.request
-        # block heavy stuff
         if r.resource_type in {"image", "font", "media", "stylesheet"}:
             return await route.abort()
         return await route.continue_()
@@ -400,7 +393,6 @@ async def zoopla_block_assets(page):
 
 async def zoopla_accept_cookies(page):
     try:
-        # OneTrust
         btn = page.locator("#onetrust-accept-btn-handler, button:has-text('Accept all'), button:has-text('Accept All')")
         await btn.click(timeout=2000)
         await page.wait_for_timeout(500)
@@ -410,15 +402,12 @@ async def zoopla_accept_cookies(page):
         pass
 
 async def zoopla_extract_links_from_page(page) -> List[str]:
-    # primary: anchor hrefs
     links = await page.eval_on_selector_all(
         "a[href*='/to-rent/details/']",
         "els => els.map(e => e.href)"
     )
     if links:
-        return list(dict.fromkeys(links))  # dedupe keep order
-
-    # fallback: JSON-LD (itemListElement) often contains URLs
+        return list(dict.fromkeys(links))
     try:
         json_links = await page.evaluate("""
         () => {
@@ -446,18 +435,14 @@ async def zoopla_extract_links_from_page(page) -> List[str]:
             return list(dict.fromkeys(json_links))
     except Exception:
         pass
-
-    # last resort: dump anchors anyway
     anchors = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
     return [u for u in anchors if "/to-rent/details/" in u]
 
 def zoopla_parse_card_text_to_fields(card_text: str, parent_text: str) -> Tuple[Optional[int], Optional[int], str]:
-    # price
     price_match = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per week|per month)", parent_text.lower())
     price_txt = price_match.group(0) if price_match else ""
     amt, freq = parse_price_text(price_txt)
     rent_pcm = to_pcm(amt, freq)
-    # beds
     mb = re.search(r"(\d+)\s*bed", card_text.lower())
     beds = int(mb.group(1)) if mb else None
     return rent_pcm, beds, price_txt
@@ -468,7 +453,6 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     page.set_default_timeout(30000)
     page.set_default_navigation_timeout(30000)
     await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
-
     await zoopla_block_assets(page)
 
     try:
@@ -478,10 +462,8 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
         await page.close()
         return listings
 
-    # accept cookies if present
     await zoopla_accept_cookies(page)
 
-    # give it a moment and scroll to force lazy content
     for _ in range(3):
         await page.wait_for_timeout(600)
         try:
@@ -489,7 +471,6 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
         except Exception:
             break
 
-    # Try to collect listing links
     try:
         links = await zoopla_extract_links_from_page(page)
     except Exception as e:
@@ -498,7 +479,6 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
 
     print(f"🔎 Zoopla {area}: found {len(links)} listing links at {url}")
 
-    # If zero, retry once after a small wait (some pages need longer)
     if not links:
         await page.wait_for_timeout(1500)
         try:
@@ -507,18 +487,15 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
             links = []
         print(f"🔁 Zoopla {area}: fallback found {len(links)} links")
 
-    # Build soup from current HTML to help with nearby text scraping
     html = await page.content()
     soup = BeautifulSoup(html, "lxml")
 
-    # Grab a bit of text around each link to infer price/beds
     seen = set()
     for abs_url in links[:50]:
         if abs_url in seen:
             continue
         seen.add(abs_url)
 
-        # Find anchor in soup to get card text
         a = soup.find("a", href=lambda h: h and abs_url.endswith(h) if abs_url.startswith("http") else h == abs_url)
         parent_text = ""
         card_text = ""
@@ -547,7 +524,7 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
             "id": norm_id("zoopla", abs_url),
             "source": "zoopla",
             "area": area,
-            "address": "Unknown",  # address usually requires detail page fetch; skip for now (lightweight)
+            "address": "Unknown",
             "rent_pcm": rent_pcm,
             "bedrooms": beds,
             "bathrooms": baths,
@@ -572,7 +549,6 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
 def build_otm_urls() -> Dict[str, str]:
     cfg = SEARCH_URLS.get("onthemarket", {})
     if cfg:
-        # in this code path we expect area->single url mapping
         return {k: (v if isinstance(v, str) else (v[0] if v else "")) for k, v in cfg.items()}
     return {area: f"https://www.onthemarket.com/to-rent/property/{area.lower().replace(' ', '-')}/"
             for area in LOCATION_IDS.keys()}
@@ -645,9 +621,7 @@ def fetch_otm_from_url(url: str, area: str) -> List[Dict]:
 def build_spareroom_urls() -> Dict[str, str]:
     cfg = SEARCH_URLS.get("spareroom", {})
     if cfg:
-        # expect area -> [url] or str
         return {k: (v[0] if isinstance(v, list) else v) for k, v in cfg.items()}
-    # generic fallback: keyword + whole-property filter
     return {area: f"https://www.spareroom.co.uk/flatshare/?search_type=offered&property_type=property&location={quote_plus(area)}"
             for area in LOCATION_IDS.keys()}
 
@@ -749,11 +723,10 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
             context = await zoopla_new_context(browser)
 
             area_urls = zoopla_area_url_groups()
-            # fill in any missing areas using generic fallback
+            # ensure we have entries for all areas
             for area in LOCATION_IDS.keys():
                 area_urls.setdefault(area, [f"https://www.zoopla.co.uk/to-rent/property/{area.lower().replace(' ', '-')}/"])
 
-            # iterate deterministically per-area and per-url
             for area in LOCATION_IDS.keys():
                 urls = area_urls.get(area, [])
                 for url in urls:
@@ -833,8 +806,8 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
 # ========= Main loop =========
 async def main() -> None:
     print("🚀 Scraper started!")
-    seen_ids: Set[str] = set()          # prevents re-sending same ID in this process
-    cross_seen: Dict[tuple, Dict] = {}  # cross-site dedupe registry
+    seen_ids: Set[str] = set()
+    cross_seen: Dict[tuple, Dict] = {}
 
     while True:
         try:
