@@ -9,43 +9,41 @@ import glob
 import hashlib
 import difflib
 import requests
-from typing import Dict, List, Set, Optional, Tuple, Iterable
+from typing import Dict, List, Set, Optional, Tuple
 from urllib.parse import urljoin, quote_plus
 from bs4 import BeautifulSoup
 
-# Playwright is optional at runtime (we only use it when HTML fallback yields 0)
 try:
     from playwright.async_api import async_playwright
 except Exception:
-    async_playwright = None  # we’ll guard usage
+    async_playwright = None
 
 print("🚀 Starting RentRadar…")
 
 # ========= Config =========
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://hook.eu2.make.com/6k1jjsv0khxbqbfplzv5ibt4d1wh3dwj")
 
-# Enable/disable sources (deterministic — no round robin)
 ENABLE_RIGHTMOVE = os.getenv("ENABLE_RIGHTMOVE", "true").lower() == "true"
 ENABLE_ZOOPLA    = os.getenv("ENABLE_ZOOPLA", "true").lower() == "true"
 ENABLE_OTM       = os.getenv("ENABLE_OTM", "true").lower() == "true"
 ENABLE_SPAREROOM = os.getenv("ENABLE_SPAREROOM", "true").lower() == "true"
 
-# Fixed execution order (no rotation)
+# Force Zoopla to Playwright only (HTML gets 403 on your host)
+ZOOPLA_PW_ONLY = True
+
 SOURCES_ORDER = [s.strip().lower() for s in os.getenv(
     "SOURCES_ORDER",
     "rightmove,zoopla,onthemarket,spareroom"
 ).split(",") if s.strip()]
 
-# Rightmove location IDs (yours)
 LOCATION_IDS: Dict[str, str] = {
     "Lincoln": "REGION^804",
     "Wirral": "REGION^93365",
     "Bridgwater": "REGION^212",
 }
 
-# ======= HARDCODED SEARCH URLS (Zoopla + SpareRoom) =======
+# ======= Explicit search URLs =======
 SEARCH_URLS: Dict[str, Dict[str, List[str] | str]] = {
-    # Zoopla: 3–4 bed houses per area (your links)
     "zoopla": {
         "Lincoln": [
             "https://www.zoopla.co.uk/to-rent/houses/lincoln/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&price_frequency=per_month&price_max=1250&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Lincoln%2C%20Lincolnshire&search_source=to-rent"
@@ -57,13 +55,11 @@ SEARCH_URLS: Dict[str, Dict[str, List[str] | str]] = {
             "https://www.zoopla.co.uk/to-rent/houses/schools/bridgewater-academy/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Bridgewater%20Academy%2C%20Somerset%2C%20TA6&search_source=to-rent"
         ],
     },
-    # SpareRoom: your saved-search links (whole property, mode=list)
     "spareroom": {
-        "Wirral": "https://www.spareroom.co.uk/flatshare/?search_id=1381769273&mode=list",
+        "Wirral":     "https://www.spareroom.co.uk/flatshare/?search_id=1381769273&mode=list",
         "Bridgwater": "https://www.spareroom.co.uk/flatshare/?search_id=1381769450&mode=list",
-        "Lincoln": "https://www.spareroom.co.uk/flatshare/?search_id=1381769591&mode=list",
+        "Lincoln":    "https://www.spareroom.co.uk/flatshare/?search_id=1381769591&mode=list",
     },
-    # OnTheMarket can be configured similarly if you later want explicit filters.
 }
 
 # ========= Economics & filters =========
@@ -74,24 +70,20 @@ MIN_RENT = int(os.getenv("MIN_RENT", "800"))
 GOOD_PROFIT_TARGET = int(os.getenv("GOOD_PROFIT_TARGET", "1300"))
 BOOKING_FEE_PCT = float(os.getenv("BOOKING_FEE_PCT", "0.15"))
 
-# Max rent caps depending on bedrooms
 MAX_RENTS: Dict[int, int] = {3: 1300, 4: 1500}
 
-# Bills per area & bedroom count
 BILLS_PER_AREA: Dict[str, Dict[int, int]] = {
     "Lincoln": {3: 520, 4: 580},
     "Wirral": {3: 540, 4: 620},
     "Bridgwater": {3: 530, 4: 600},
 }
 
-# Nightly ADR per area & bedroom count
 NIGHTLY_RATES: Dict[str, Dict[int, int]] = {
     "Lincoln": {3: 150, 4: 178},
     "Wirral": {3: 165, 4: 196},
     "Bridgwater": {3: 170, 4: 205},
 }
 
-# Occupancy rates per area & bedroom count
 OCCUPANCY: Dict[str, Dict[int, float]] = {
     "Lincoln": {3: 0.65, 4: 0.66},
     "Wirral": {3: 0.67, 4: 0.68},
@@ -105,27 +97,19 @@ REQUEST_COOLDOWN_SEC = (1.0, 2.0)
 SESSION = requests.Session()
 
 UA_POOL = [
-    # desktop
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
 ]
-UA_MOBILE = [
-    # mobile — helpful for HTML fallback
-    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-]
 
-def _headers(mobile: bool = False) -> Dict[str, str]:
-    ua = random.choice(UA_MOBILE if mobile else UA_POOL)
+def _headers() -> Dict[str, str]:
     return {
-        "User-Agent": ua,
+        "User-Agent": random.choice(UA_POOL),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-GB,en;q=0.9",
         "Connection": "keep-alive",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
-        # Minimal DNT/upgrade for variety
         "DNT": "1",
         "Upgrade-Insecure-Requests": "1",
     }
@@ -133,7 +117,6 @@ def _headers(mobile: bool = False) -> Dict[str, str]:
 def _sleep():
     time.sleep(random.uniform(*REQUEST_COOLDOWN_SEC))
 
-# ======== Debug flags print ========
 print(f"Flags → ZOOPLA={ENABLE_ZOOPLA}, OTM={ENABLE_OTM}, SPAREROOM={ENABLE_SPAREROOM}, ORDER={SOURCES_ORDER}")
 
 # ========= Economics helpers =========
@@ -277,10 +260,10 @@ def is_cross_duplicate(listing: Dict, registry: Dict[tuple, Dict]) -> Tuple[bool
     return False, None, key
 
 # ========= Generic HTML fetcher (requests) =========
-def get_soup(url: str, mobile: bool = False) -> Optional[BeautifulSoup]:
+def get_soup(url: str) -> Optional[BeautifulSoup]:
     for _ in range(RETRY_ATTEMPTS):
         try:
-            resp = SESSION.get(url, headers=_headers(mobile=mobile), timeout=REQUEST_TIMEOUT)
+            resp = SESSION.get(url, headers=_headers(), timeout=REQUEST_TIMEOUT)
             if resp.status_code != 200:
                 print(f"⚠️ GET {resp.status_code} {url}")
                 _sleep()
@@ -373,7 +356,7 @@ def filter_rightmove(properties: List[Dict], area: str) -> List[Dict]:
             continue
     return results
 
-# ========= Zoopla (HTML-first, then Playwright fallback) =========
+# ========= Zoopla (Playwright‑only) =========
 def build_zoopla_urls() -> Dict[str, List[str]]:
     cfg = SEARCH_URLS.get("zoopla", {})
     out: Dict[str, List[str]] = {}
@@ -384,65 +367,10 @@ def build_zoopla_urls() -> Dict[str, List[str]]:
     return {area: [f"https://www.zoopla.co.uk/to-rent/property/{area.lower().replace(' ', '-')}/"]
             for area in LOCATION_IDS.keys()}
 
-def _zoopla_collect_links_from_soup(soup: BeautifulSoup) -> List[str]:
-    links: List[str] = []
-    if not soup:
-        return links
+def _to_mobile_zoopla(url: str) -> str:
+    # Use mobile host (lighter, fewer anti-bot scripts)
+    return url.replace("https://www.zoopla.co.uk", "https://m.zoopla.co.uk")
 
-    # a) direct anchors with details pattern
-    for a in soup.select("a[href*='/to-rent/details/']"):
-        href = a.get("href") or ""
-        if not href:
-            continue
-        abs_url = href if href.startswith("http") else urljoin("https://www.zoopla.co.uk", href)
-        links.append(abs_url)
-
-    # b) any script JSON blob with details
-    scripts = soup.select("script[type='application/json'], script#__NEXT_DATA__")
-    for s in scripts:
-        txt = s.get_text("", strip=False) or ""
-        if "/to-rent/details/" in txt:
-            for m in re.findall(r'"/to-rent/details/\d+/?', txt):
-                links.append("https://www.zoopla.co.uk" + m.strip('"'))
-            for m in re.findall(r'https?:\\/\\/www\\.zoopla\\.co\\.uk\\/to-rent\\/details\\/\\d+\\/?', txt):
-                links.append(m.replace("\\/", "/"))
-
-    # unique + canonical
-    out = []
-    seen = set()
-    for u in links:
-        if not u:
-            continue
-        if u.endswith("/") and "/to-rent/details/" in u:
-            u = u.rstrip("/")
-        if "/to-rent/details/" not in u:
-            continue
-        if u in seen:
-            continue
-        seen.add(u)
-        out.append(u)
-    return out
-
-def _maybe_mobile_url(url: str) -> str:
-    # We can try the same desktop URL but request with a mobile UA first.
-    # If you want to force the m. subdomain, uncomment:
-    # return url.replace("https://www.zoopla.co.uk", "https://m.zoopla.co.uk")
-    return url
-
-def fetch_zoopla_html_fallback(url: str) -> List[str]:
-    """Try to fetch Zoopla search HTML with mobile UA and extract details links."""
-    # 1) Try “desktop URL” with mobile UA (often returns fully rendered HTML)
-    soup = get_soup(_maybe_mobile_url(url), mobile=True)
-    links = _zoopla_collect_links_from_soup(soup) if soup else []
-    if links:
-        return links
-
-    # 2) Try again with desktop UA (just in case)
-    soup2 = get_soup(url, mobile=False)
-    links2 = _zoopla_collect_links_from_soup(soup2) if soup2 else []
-    return links2
-
-# ----- Playwright helpers for Zoopla -----
 async def zoopla_launch_browser(pw):
     system_chromium = (
         next(iter(glob.glob("/root/.nix-profile/bin/chromium")), None) or
@@ -454,12 +382,13 @@ async def zoopla_launch_browser(pw):
         "--disable-dev-shm-usage",
         "--disable-gpu",
         "--disable-software-rasterizer",
-        "--single-process",
-        "--renderer-process-limit=1",
         "--lang=en-GB",
         "--js-flags=--max-old-space-size=128",
         "--disable-features=AutomationControlled",
         "--disable-blink-features=AutomationControlled",
+        "--single-process",
+        "--renderer-process-limit=1",
+        "--window-size=1280,2200",
     ]
     if system_chromium:
         print(f"Using system Chromium: {system_chromium}")
@@ -499,7 +428,7 @@ async def zoopla_accept_cookies(page):
     except Exception:
         pass
 
-async def zoopla_extract_links_from_dom(page) -> List[str]:
+async def zoopla_extract_links(page) -> List[str]:
     links: List[str] = []
     try:
         sel_candidates = [
@@ -518,7 +447,8 @@ async def zoopla_extract_links_from_dom(page) -> List[str]:
                         links.extend(hrefs)
             except Exception:
                 pass
-        # fallback sweep
+
+        # sweep all anchors as fallback
         try:
             hrefs_all = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
             for u in hrefs_all or []:
@@ -529,8 +459,7 @@ async def zoopla_extract_links_from_dom(page) -> List[str]:
     except Exception:
         pass
 
-    # unique + canonical
-    out, seen = [], set()
+    uniq, seen = [], set()
     for u in links:
         if not u:
             continue
@@ -543,8 +472,8 @@ async def zoopla_extract_links_from_dom(page) -> List[str]:
         if u in seen:
             continue
         seen.add(u)
-        out.append(u)
-    return out
+        uniq.append(u)
+    return uniq
 
 async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     listings: List[Dict] = []
@@ -552,38 +481,39 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     page.set_default_timeout(45000)
     page.set_default_navigation_timeout(45000)
     await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
+
+    target = _to_mobile_zoopla(url)
     try:
-        # Less aggressive wait (reduce “Page crashed” likelihood)
-        await page.goto(url, wait_until="domcontentloaded")
+        # Try DOMContentLoaded first — more stable on low-mem hosts
+        await page.goto(target, wait_until="domcontentloaded")
         await zoopla_accept_cookies(page)
 
-        # gentle hydration & pagination
-        for _ in range(8):
+        # Gentle scroll & optional "load more"
+        for _ in range(10):
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(700)
             try:
                 btn = page.locator("button:has-text('Show more'), button:has-text('Load more')")
                 if await btn.count():
-                    await btn.first.click(timeout=1500)
-                    await page.wait_for_timeout(1200)
+                    await btn.first.click(timeout=1200)
+                    await page.wait_for_timeout(900)
             except Exception:
                 pass
 
-        links = await zoopla_extract_links_from_dom(page)
-        print(f"🔎 Zoopla {area}: found {len(links)} listing links at {url}")
+        links = await zoopla_extract_links(page)
+        print(f"🔎 Zoopla {area}: PW found {len(links)} links")
 
         if not links:
-            await page.wait_for_timeout(1500)
-            links = await zoopla_extract_links_from_dom(page)
-            print(f"🔁 Zoopla {area}: fallback found {len(links)} links")
-
-        if not links:
+            # One retry with a fresh page to avoid “page crashed” residue
             await page.close()
-            print(f"🧮 Zoopla {area}: parsed 0 listings")
-            return []
+            page = await context.new_page()
+            page.set_default_timeout(45000)
+            await page.goto(target, wait_until="domcontentloaded")
+            await page.wait_for_timeout(1200)
+            links = await zoopla_extract_links(page)
+            print(f"🔁 Zoopla {area}: PW retry found {len(links)} links")
 
-        for abs_url in links[:100]:
-            # Minimal object (we can enrich later if needed)
+        for abs_url in links[:120]:
             beds = MIN_BEDS
             rent_pcm = MIN_RENT
             baths = max(MIN_BATHS, 1)
@@ -612,12 +542,13 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
                 "rag": rag,
             })
     except Exception as e:
-        print(f"⚠️ Zoopla goto/extract failed for {url}: {e}")
+        print(f"⚠️ Zoopla PW failed for {target}: {e}")
     finally:
         try:
             await page.close()
         except Exception:
             pass
+
     print(f"🧮 Zoopla {area}: parsed {len(listings)} listings")
     return listings
 
@@ -722,7 +653,7 @@ def fetch_spareroom_from_url(url: str, area: str) -> List[Dict]:
 
         mb = re.search(r"(\d+)\s*bed", text.lower())
         if not mb:
-            continue  # likely a room/HMO listing not whole property
+            continue
         beds = int(mb.group(1))
         if beds < MIN_BEDS or beds > MAX_BEDS:
             continue
@@ -788,79 +719,18 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
                 new_listings.append(listing)
             time.sleep(1.0)
 
-    # ---- Zoopla (HTML-first; Playwright fallback) ----
-    if "zoopla" in SOURCES_ORDER and ENABLE_ZOOPLA:
+    # ---- Zoopla (PW only) ----
+    if "zoopla" in SOURCES_ORDER and ENABLE_ZOOPLA and async_playwright is not None:
         urls = build_zoopla_urls()
-        # First pass: HTML fallback for each URL
-        html_links_per_area: Dict[Tuple[str, str], List[str]] = {}
-        for area, url_list in urls.items():
-            for url in url_list:
-                print(f"\n📍 [Zoopla] {area} (HTML) → {url}")
-                try:
-                    links = fetch_zoopla_html_fallback(url)
-                    print(f"🔎 Zoopla {area} HTML: {len(links)} links")
-                    html_links_per_area[(area, url)] = links
-                except Exception as e:
-                    print(f"⚠️ Zoopla HTML fallback failed for {url}: {e}")
-                    html_links_per_area[(area, url)] = []
+        print("\n🧭 Launching Playwright for Zoopla…")
+        try:
+            async with async_playwright() as pw:
+                browser = await zoopla_launch_browser(pw)
+                context = await zoopla_new_context(browser)
 
-        # Use HTML links where we have them
-        for (area, url), links in html_links_per_area.items():
-            if not links:
-                continue
-            for abs_url in links[:100]:
-                beds = MIN_BEDS
-                rent_pcm = MIN_RENT
-                baths = max(MIN_BATHS, 1)
-                p = calculate_profits(rent_pcm, area, beds)
-                p70 = p["profit_70"]
-                score10 = round(max(0, min(10, (p70 / GOOD_PROFIT_TARGET) * 10)), 1)
-                rag = "🟢" if p70 >= GOOD_PROFIT_TARGET else ("🟡" if p70 >= GOOD_PROFIT_TARGET * 0.7 else "🔴")
-                listing = {
-                    "id": norm_id("zoopla", abs_url),
-                    "source": "zoopla",
-                    "area": area,
-                    "address": "Unknown",
-                    "rent_pcm": rent_pcm,
-                    "bedrooms": beds,
-                    "bathrooms": baths,
-                    "propertySubType": "Property",
-                    "url": abs_url,
-                    "night_rate": p["night_rate"],
-                    "occ_rate": p["occ_rate"],
-                    "bills": p["total_bills"],
-                    "profit_50": p["profit_50"],
-                    "profit_70": p70,
-                    "profit_100": p["profit_100"],
-                    "target_profit_70": GOOD_PROFIT_TARGET,
-                    "score10": score10,
-                    "rag": rag,
-                }
-                is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
-                if is_dup:
-                    preferred = choose_preferred(existing, listing)
-                    cross_registry[key] = preferred
-                    if preferred is existing:
-                        continue
-                else:
-                    cross_registry[key] = listing
-                if listing["id"] in seen_ids:
-                    continue
-                seen_ids.add(listing["id"])
-                new_listings.append(listing)
-
-        # If any URL had 0 HTML links → run a single Playwright session and try those only
-        need_pw = any(len(v) == 0 for v in html_links_per_area.values())
-        if need_pw and async_playwright is not None:
-            print("\n🧭 Launching Playwright for Zoopla fallback…")
-            try:
-                async with async_playwright() as pw:
-                    browser = await zoopla_launch_browser(pw)
-                    context = await zoopla_new_context(browser)
-                    for (area, url), links in html_links_per_area.items():
-                        if links:
-                            continue  # already got data from HTML
-                        print(f"\n📍 [Zoopla] {area} (PW) → {url}")
+                for area, url_list in urls.items():
+                    for url in url_list:
+                        print(f"\n📍 [Zoopla] {area} → {url}")
                         try:
                             listings = await fetch_zoopla_playwright(context, url, area)
                             for listing in listings:
@@ -878,11 +748,12 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
                                 new_listings.append(listing)
                             await asyncio.sleep(0.5)
                         except Exception as e:
-                            print(f"⚠️ Zoopla PW failed for {url}: {e}")
-                    await context.close()
-                    await browser.close()
-            except Exception as e:
-                print(f"⚠️ Playwright not available or failed to launch: {e}")
+                            print(f"⚠️ Zoopla PW area run failed for {url}: {e}")
+
+                await context.close()
+                await browser.close()
+        except Exception as e:
+            print(f"⚠️ Playwright not available or failed to launch: {e}")
 
     # ---- OnTheMarket ----
     if ("onthemarket" in SOURCES_ORDER or "otm" in SOURCES_ORDER) and ENABLE_OTM:
