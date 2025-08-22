@@ -1,0 +1,119 @@
+*** Begin Patch
+*** Update File: main.py
+@@ async def _launch_browser_with_proxy(pw):
+-    launch_kwargs = {
+-        "headless": True,
+-        "args": [
+-            "--disable-blink-features=AutomationControlled",
+-            "--disable-dev-shm-usage",
+-            "--no-sandbox",
+-            "--disable-gpu",
+-            "--hide-scrollbars",
+-            "--mute-audio",
+-        ],
+-    }
++    launch_kwargs = {
++        "headless": True,
++        # Use a more exhaustive list of Chromium flags to improve stability and
++        # more closely resemble a real user browser session.  These flags
++        # disable background throttling and other features that can cause
++        # crashes when running headlessly on Railway.
++        "args": [
++            "--disable-blink-features=AutomationControlled",
++            "--disable-dev-shm-usage",
++            "--no-sandbox",
++            "--disable-gpu",
++            "--hide-scrollbars",
++            "--mute-audio",
++            "--disable-background-timer-throttling",
++            "--disable-backgrounding",
++            "--disable-renderer-backgrounding",
++            "--no-zygote",
++            "--no-first-run",
++            "--no-default-browser-check",
++        ],
++    }
+@@ async def _launch_browser_with_proxy(pw):
+-    context = await browser.new_context(
+-        locale="en-GB",
+-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+-        viewport={"width": 1366, "height": 768},
+-        java_script_enabled=True,
+-    )
++    # Randomise the user agent per launch to avoid simple bot heuristics.
++    context = await browser.new_context(
++        locale="en-GB",
++        user_agent=random.choice(UA_POOL),
++        viewport={"width": 1366, "height": 768},
++        java_script_enabled=True,
++    )
+@@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
+-    listings: List[Dict] = []
+-    page = await context.new_page()
+-
+-    # Block heavy assets
+-    async def route_handler(route):
+-        u = route.request.url
+-        if any(u.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf", ".otf")):
+-            return await route.abort()
+-        return await route.continue_()
+-    await page.route("**/*", route_handler)
+-
+-    await page.set_extra_http_headers({
+-        "Accept-Language": "en-GB,en;q=0.9",
+-        "DNT": "1",
+-    })
+-
+-    for attempt in range(1, 3):  # 1=desktop, 2=mobile fallback
+-        try_url = url if attempt == 1 else url.replace("https://www.", "https://m.")
+-        if attempt == 2:
+-            print(f"🔁 Zoopla {area}: desktop empty, retrying on mobile → {try_url}")
+-        try:
+-            await page.goto(try_url, wait_until="domcontentloaded", timeout=120_000)
+-        except Exception as e:
+-            print(f"⚠️ Zoopla goto/extract failed for {try_url}: {e}")
+-            continue
++    listings: List[Dict] = []
++    page = None
++
++    # Define a route handler once; we'll register it on each new page. It aborts
++    # heavy asset types to speed up page load and save bandwidth.
++    async def route_handler(route):
++        u = route.request.url
++        if any(u.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf", ".otf")):
++            return await route.abort()
++        return await route.continue_()
++
++    for attempt in range(1, 3):  # 1=desktop, 2=mobile fallback
++        try_url = url if attempt == 1 else url.replace("https://www.", "https://m.")
++        if attempt == 2:
++            print(f"🔁 Zoopla {area}: desktop empty, retrying on mobile → {try_url}")
++
++        # Always start with a fresh page. If a previous navigation crashed the page,
++        # it's safer to dispose of it and open a new one.
++        if page:
++            try:
++                await page.close()
++            except Exception:
++                pass
++            page = None
++        page = await context.new_page()
++        await page.route("**/*", route_handler)
++        # Provide default headers including a referer; Zoopla will return 403 if
++        # requests have no referer.
++        await page.set_extra_http_headers({
++            "Accept-Language": "en-GB,en;q=0.9",
++            "DNT": "1",
++            "Referer": "https://www.google.com/",
++        })
++        try:
++            await page.goto(
++                try_url,
++                wait_until="domcontentloaded",
++                timeout=120_000,
++                referer="https://www.google.com/",
++            )
++        except Exception as e:
++            print(f"⚠️ Zoopla goto/extract failed for {try_url}: {e}")
++            continue
+*** End Patch
