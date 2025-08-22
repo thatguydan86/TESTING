@@ -1,19 +1,18 @@
 import os
-os.environ.setdefault("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
+os.environ.setdefault("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")  # harmless with Nix
 
-# then your other imports…
 import asyncio
 import time
 import random
 import re
 import hashlib
 import difflib
+import glob
 import requests
 from typing import Dict, List, Set, Optional, Tuple
 from urllib.parse import urljoin, quote_plus
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-
 
 print("🚀 Starting RentRadar…")
 
@@ -32,15 +31,14 @@ SOURCES_ORDER = [s.strip().lower() for s in os.getenv(
     "rightmove,zoopla,onthemarket,spareroom"
 ).split(",") if s.strip()]
 
-# Rightmove location IDs (your originals)
+# Rightmove location IDs
 LOCATION_IDS: Dict[str, str] = {
     "Lincoln": "REGION^804",
     "Wirral": "REGION^93365",
     "Bridgwater": "REGION^212",
 }
 
-# Optional: explicit search URLs per source (recommended for Zoopla/OTM/SpareRoom)
-# Add your filtered links here. I’ve included your SpareRoom whole-property link.
+# Optional: explicit search URLs per source (recommended to tighten results)
 SEARCH_URLS: Dict[str, Dict[str, str]] = {
     # "zoopla": {
     #     "Lincoln":    "https://www.zoopla.co.uk/to-rent/property/lincoln/?beds_min=3&beds_max=4&price_min=800&price_max=1500",
@@ -53,7 +51,7 @@ SEARCH_URLS: Dict[str, Dict[str, str]] = {
     #     "Bridgwater": "https://www.onthemarket.com/to-rent/property/bridgwater/?min-bedrooms=3&max-bedrooms=4&price-from=800&price-to=1500",
     # },
     "spareroom": {
-        "Liverpool": "https://www.spareroom.co.uk/flatshare/?search_id=1381621815&mode=list",
+        "Liverpool": "https://www.spareroom.co.uk/flatshare/?search_id=1381621815&mode=list"
     }
 }
 
@@ -350,12 +348,12 @@ def filter_rightmove(properties: List[Dict], area: str) -> List[Dict]:
             continue
     return results
 
-# ========= Zoopla (Playwright) =========
+# ========= Zoopla (Playwright via Nix system browsers) =========
 def build_zoopla_urls() -> Dict[str, str]:
     cfg = SEARCH_URLS.get("zoopla", {})
     if cfg:
         return cfg
-    # Fallback generic searches (works with Playwright); replace with your filtered URLs when ready
+    # Fallback generic searches; replace with filtered URLs if desired
     return {area: f"https://www.zoopla.co.uk/to-rent/property/{area.lower().replace(' ', '-')}/"
             for area in LOCATION_IDS.keys()}
 
@@ -364,7 +362,6 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     page = await context.new_page()
     await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
 
-    # Block heavy assets
     async def route_handler(route):
         if any(ext in route.request.url for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf", ".otf")):
             await route.abort()
@@ -373,7 +370,7 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     await page.route("**/*", route_handler)
 
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(1200)  # small think time
+    await page.wait_for_timeout(1200)
 
     html = await page.content()
     soup = BeautifulSoup(html, "lxml")
@@ -519,7 +516,6 @@ def build_spareroom_urls() -> Dict[str, str]:
     cfg = SEARCH_URLS.get("spareroom", {})
     if cfg:
         return cfg
-    # Fallback (not ideal): keyword + whole-property filter
     return {area: f"https://www.spareroom.co.uk/flatshare/?search_type=offered&property_type=property&location={quote_plus(area)}"
             for area in LOCATION_IDS.keys()}
 
@@ -544,7 +540,7 @@ def fetch_spareroom_from_url(url: str, area: str) -> List[Dict]:
 
         mb = re.search(r"(\d+)\s*bed", text.lower())
         if not mb:
-            continue  # usually room/HMO without clear beds
+            continue
         beds = int(mb.group(1))
         if beds < MIN_BEDS or beds > MAX_BEDS:
             continue
@@ -610,60 +606,64 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
                 new_listings.append(listing)
             time.sleep(1.0)
 
-    # ---- Zoopla (Playwright with Firefox→Chromium fallback) ----
+    # ---- Zoopla (Playwright using Nix system browsers) ----
     if "zoopla" in SOURCES_ORDER and ENABLE_ZOOPLA:
         print("\n🧭 Launching Playwright for Zoopla…")
         pw = await async_playwright().start()
         browser = None
         try:
-            browser = await pw.firefox.launch(headless=True)
-            import glob  # (at top of file, if not already imported)
+            # find Nix system browsers
+            system_firefox = next(iter(glob.glob("/nix/store/*-firefox-*/bin/firefox")), None)
+            system_chromium = (
+                next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium")), None)
+                or next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium-browser")), None)
+            )
 
-print("\n🧭 Launching Playwright for Zoopla…")
-pw = await async_playwright().start()
+            if system_firefox:
+                print(f"Using system Firefox: {system_firefox}")
+                browser = await pw.firefox.launch(headless=True, executable_path=system_firefox)
+            elif system_chromium:
+                print(f"Using system Chromium: {system_chromium}")
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    executable_path=system_chromium,
+                    args=["--no-sandbox"]
+                )
+            else:
+                raise RuntimeError("No system Firefox/Chromium binaries found under /nix/store")
 
-# Find Nix system browsers
-system_firefox = next(iter(glob.glob("/nix/store/*-firefox-*/bin/firefox")), None)
-# chromium can be 'chromium' or 'chromium-browser' depending on build
-system_chromium = (next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium")), None)
-                   or next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium-browser")), None))
-
-browser = None
-try:
-    if not system_firefox:
-        raise RuntimeError("No system Firefox found")
-    print(f"Using system Firefox: {system_firefox}")
-    browser = await pw.firefox.launch(headless=True, executable_path=system_firefox)
-except Exception as e_ff:
-    print(f"System Firefox failed ({e_ff}); trying system Chromium…")
-    if not system_chromium:
-        raise RuntimeError("No system Chromium found")
-    print(f"Using system Chromium: {system_chromium}")
-    # --no-sandbox is typically required in containers
-    browser = await pw.chromium.launch(headless=True, executable_path=system_chromium, args=["--no-sandbox"])
-
-context = await browser.new_context(locale="en-GB")
-
-        urls = build_zoopla_urls()
-        for area, url in urls.items():
-            print(f"\n📍 [Zoopla] {area}…")
-            listings = await fetch_zoopla_playwright(context, url, area)
-            for listing in listings:
-                is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
-                if is_dup:
-                    preferred = choose_preferred(existing, listing)
-                    cross_registry[key] = preferred
-                    if preferred is existing:
+            context = await browser.new_context(locale="en-GB")
+            urls = build_zoopla_urls()
+            for area, url in urls.items():
+                print(f"\n📍 [Zoopla] {area}…")
+                listings = await fetch_zoopla_playwright(context, url, area)
+                for listing in listings:
+                    is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
+                    if is_dup:
+                        preferred = choose_preferred(existing, listing)
+                        cross_registry[key] = preferred
+                        if preferred is existing:
+                            continue
+                    else:
+                        cross_registry[key] = listing
+                    if listing["id"] in seen_ids:
                         continue
-                else:
-                    cross_registry[key] = listing
-                if listing["id"] in seen_ids:
-                    continue
-                seen_ids.add(listing["id"])
-                new_listings.append(listing)
-            await asyncio.sleep(1.0)
-        await browser.close()
-        await pw.stop()
+                    seen_ids.add(listing["id"])
+                    new_listings.append(listing)
+                await asyncio.sleep(1.0)
+
+        except Exception as e:
+            print(f"⚠️ Zoopla scrape failed: {e}")
+        finally:
+            try:
+                if browser:
+                    await browser.close()
+            except Exception:
+                pass
+            try:
+                await pw.stop()
+            except Exception:
+                pass
 
     # ---- OnTheMarket (requests) ----
     if ("onthemarket" in SOURCES_ORDER or "otm" in SOURCES_ORDER) and ENABLE_OTM:
@@ -710,8 +710,8 @@ context = await browser.new_context(locale="en-GB")
 # ========= Main loop =========
 async def main() -> None:
     print("🚀 Scraper started!")
-    seen_ids: Set[str] = set()          # prevents re-sending same ID in this process
-    cross_seen: Dict[tuple, Dict] = {}  # cross-site dedupe registry
+    seen_ids: Set[str] = set()
+    cross_seen: Dict[tuple, Dict] = {}
 
     while True:
         try:
