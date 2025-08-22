@@ -1,6 +1,7 @@
-import os
-os.environ.setdefault("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
+# main.py
 
+import os
+import glob
 import asyncio
 import time
 import random
@@ -8,32 +9,33 @@ import re
 import hashlib
 import difflib
 from typing import Dict, List, Set, Optional, Tuple
-from urllib.parse import urljoin, quote_plus, urlparse
+from urllib.parse import urljoin, quote_plus
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
-# Playwright is optional at runtime (only used for Zoopla)
-try:
-    from playwright.async_api import async_playwright, Browser, BrowserContext, Page
-    HAS_PLAYWRIGHT = True
-except Exception:
-    HAS_PLAYWRIGHT = False
+# --- Environment hardening / defaults ----------------------------------------
 
+# Skip host dep checks in containers; we only need Chromium with --with-deps
+os.environ.setdefault("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
+
+# Some hosts need this so Chrome can start headless as root
+os.environ.setdefault("CHROME_NO_SANDBOX", "1")
+
+# --- Boot banner --------------------------------------------------------------
 
 print("🚀 Starting RentRadar…")
 
-# ========= Config =========
+# ========= Config =============================================================
+
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://hook.eu2.make.com/6k1jjsv0khxbqbfplzv5ibt4d1wh3dwj")
 
-# Enable/disable sources (deterministic, no round robin)
-ENABLE_RIGHTMOVE = os.getenv("ENABLE_RIGHTMOVE", "true").lower() == "true"
-ENABLE_ZOOPLA    = os.getenv("ENABLE_ZOOPLA", "false").lower() == "true"
-ENABLE_OTM       = os.getenv("ENABLE_OTM", "false").lower() == "true"
-ENABLE_SPAREROOM = os.getenv("ENABLE_SPAREROOM", "false").lower() == "true"
-
-# Optional: also try Zoopla HTML fallback (uses requests) via proxy
-ZOOPLA_HTML_FALLBACK = os.getenv("ZOOPLA_HTML_FALLBACK", "true").lower() == "true"
+# Enable/disable sources (deterministic)
+ENABLE_RIGHTMOVE  = os.getenv("ENABLE_RIGHTMOVE", "true").lower() == "true"
+ENABLE_ZOOPLA     = os.getenv("ENABLE_ZOOPLA", "true").lower() == "true"
+ENABLE_OTM        = os.getenv("ENABLE_OTM", "true").lower() == "true"
+ENABLE_SPAREROOM  = os.getenv("ENABLE_SPAREROOM", "true").lower() == "true"
 
 # Deterministic execution order
 SOURCES_ORDER = [s.strip().lower() for s in os.getenv(
@@ -41,51 +43,38 @@ SOURCES_ORDER = [s.strip().lower() for s in os.getenv(
     "rightmove,zoopla,onthemarket,spareroom"
 ).split(",") if s.strip()]
 
-# Rightmove location IDs (your originals)
+# Optional Zoopla residential proxy (highly recommended)
+# Example: http://user:pass@p.webshare.io:80
+ZOOPLA_PROXY = os.getenv("ZOOPLA_PROXY", "").strip()
+
+# Areas (Rightmove API needs location IDs)
 LOCATION_IDS: Dict[str, str] = {
     "Lincoln": "REGION^804",
     "Wirral": "REGION^93365",
     "Bridgwater": "REGION^212",
 }
 
-# --------- Hard-coded search URLs (as requested) ---------
-SEARCH_URLS: Dict[str, Dict[str, str]] = {
-    "zoopla": {
-        # Lincoln 3–4 bed houses
-        "Lincoln": (
-            "https://www.zoopla.co.uk/to-rent/houses/lincoln/"
-            "?beds_max=4&beds_min=3"
-            "&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false"
-            "&price_frequency=per_month&price_max=1250"
-            "&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced"
-            "&q=Lincoln%2C%20Lincolnshire&search_source=to-rent"
-        ),
-        # Wirral 3–4 bed houses
-        "Wirral": (
-            "https://www.zoopla.co.uk/to-rent/houses/merseyside/wirral/"
-            "?beds_max=4&beds_min=3"
-            "&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false"
-            "&price_frequency=per_month&price_max=1250"
-            "&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced"
-            "&q=Wirral%2C%20Merseyside&search_source=to-rent"
-        ),
-        # Bridgwater Academy 3–4 bed houses
-        "Bridgwater": (
-            "https://www.zoopla.co.uk/to-rent/houses/schools/bridgewater-academy/"
-            "?beds_max=4&beds_min=3"
-            "&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false"
-            "&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced"
-            "&q=Bridgewater%20Academy%2C%20Somerset%2C%20TA6&search_source=to-rent"
-        ),
-    },
-    # SpareRoom whole-property saved searches (you provided)
-    "spareroom": {
-        "Wirral":      "https://www.spareroom.co.uk/flatshare/?search_id=1381769273&mode=list",
-        "Bridgwater":  "https://www.spareroom.co.uk/flatshare/?search_id=1381769450&mode=list",
-        "Lincoln":     "https://www.spareroom.co.uk/flatshare/?search_id=1381769591&mode=list",
-    },
-    # You can add OnTheMarket search URLs here if you prefer explicit filters,
-    # otherwise we’ll use generic ones per area below.
+# Hard-coded Zoopla search URLs (3–4 bed, ≤£1250 where relevant)
+Z_SEARCH: Dict[str, List[str]] = {
+    "Lincoln": [
+        # 3–4 beds, houses, ≤£1250
+        "https://www.zoopla.co.uk/to-rent/houses/lincoln/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&price_frequency=per_month&price_max=1250&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Lincoln%2C%20Lincolnshire&search_source=to-rent",
+    ],
+    "Wirral": [
+        # 3–4 beds, houses, ≤£1250
+        "https://www.zoopla.co.uk/to-rent/houses/merseyside/wirral/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&price_frequency=per_month&price_max=1250&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Wirral%2C%20Merseyside&search_source=to-rent",
+    ],
+    "Bridgwater": [
+        # 3–4 beds around Bridgewater Academy
+        "https://www.zoopla.co.uk/to-rent/houses/schools/bridgewater-academy/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Bridgewater%20Academy%2C%20Somerset%2C%20TA6&search_source=to-rent",
+    ],
+}
+
+# SpareRoom saved search links you provided
+SPAREROOM_URLS: Dict[str, str] = {
+    "Wirral":      "https://www.spareroom.co.uk/flatshare/?search_id=1381769273&mode=list",
+    "Bridgwater":  "https://www.spareroom.co.uk/flatshare/?search_id=1381769450&mode=list",
+    "Lincoln":     "https://www.spareroom.co.uk/flatshare/?search_id=1381769591&mode=list",
 }
 
 # Economics & filters
@@ -119,38 +108,42 @@ OCCUPANCY: Dict[str, Dict[int, float]] = {
 # Requests session & pacing
 REQUEST_TIMEOUT = 30
 RETRY_ATTEMPTS = 3
-REQUEST_COOLDOWN_SEC = (1.0, 2.0)
 SESSION = requests.Session()
 
 UA_POOL = [
-    # Desktop-ish
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    # Modern Chrome (desktop)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    # Alt variants
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
 ]
 
-MOBILE_UA = (
-    "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36"
-)
-
-def _headers(mobile: bool = False) -> Dict[str, str]:
-    return {
-        "User-Agent": MOBILE_UA if mobile else random.choice(UA_POOL),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+def _headers(host: str = "") -> Dict[str, str]:
+    ua = random.choice(UA_POOL)
+    h = {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-GB,en;q=0.9",
-        "Connection": "keep-alive",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Upgrade-Insecure-Requests": "1",
     }
+    if host:
+        h["Referer"] = f"https://{host}/"
+    return h
 
 def _sleep():
-    time.sleep(random.uniform(*REQUEST_COOLDOWN_SEC))
+    # No round-robin delays; just tiny think time to be polite
+    time.sleep(random.uniform(0.6, 1.4))
 
-# ======== Debug flags print ========
+# ======== Debug flags print ===================================================
 print(f"Flags → ZOOPLA={ENABLE_ZOOPLA}, OTM={ENABLE_OTM}, SPAREROOM={ENABLE_SPAREROOM}, ORDER={SOURCES_ORDER}")
 
-# ========= Economics helpers =========
+# ========= Economics helpers ==================================================
 def monthly_net_from_adr(adr: float, occ: float) -> float:
     gross = adr * occ * 30
     return gross * (1 - BOOKING_FEE_PCT)
@@ -207,7 +200,7 @@ def post_to_webhook(listing: Dict):
     except Exception as e:
         print(f"⚠️ Failed to POST to webhook: {e}")
 
-# ========= Cross-site de-duplication =========
+# ========= Cross-site de-duplication =========================================
 SOURCE_PRIORITY = {"rightmove": 4, "onthemarket": 3, "zoopla": 2, "spareroom": 1}
 UK_POSTCODE_RE = re.compile(r"\b([A-Z]{1,2}\d{1,2}[A-Z]?)\s?(\d[A-Z]{2})\b", re.I)
 HOUSE_NO_RE = re.compile(r"\b(\d+[A-Z]?)\b")
@@ -290,11 +283,20 @@ def is_cross_duplicate(listing: Dict, registry: Dict[tuple, Dict]) -> Tuple[bool
             return True, v, k
     return False, None, key
 
-# ========= Generic HTML fetcher (requests) =========
-def get_soup(url: str, *, mobile: bool = False, proxies: Optional[Dict[str, str]] = None) -> Optional[BeautifulSoup]:
+# ========= Generic HTML fetcher (requests) ===================================
+def get_soup(url: str, host_hint: str = "", use_proxy: bool = False) -> Optional[BeautifulSoup]:
+    proxies = None
+    if use_proxy and ZOOPLA_PROXY:
+        proxies = {"http": ZOOPLA_PROXY, "https": ZOOPLA_PROXY}
     for _ in range(RETRY_ATTEMPTS):
         try:
-            resp = SESSION.get(url, headers=_headers(mobile=mobile), timeout=REQUEST_TIMEOUT, proxies=proxies)
+            resp = SESSION.get(
+                url,
+                headers=_headers(host_hint),
+                timeout=REQUEST_TIMEOUT,
+                proxies=proxies,
+                allow_redirects=True,
+            )
             if resp.status_code != 200:
                 print(f"⚠️ GET {resp.status_code} {url}")
                 _sleep()
@@ -305,7 +307,7 @@ def get_soup(url: str, *, mobile: bool = False, proxies: Optional[Dict[str, str]
             _sleep()
     return None
 
-# ========= Rightmove (API) =========
+# ========= Rightmove (API) ====================================================
 def fetch_rightmove(location_id: str) -> List[Dict]:
     params = {
         "locationIdentifier": location_id,
@@ -325,7 +327,7 @@ def fetch_rightmove(location_id: str) -> List[Dict]:
     url = "https://www.rightmove.co.uk/api/_search"
     for _ in range(RETRY_ATTEMPTS):
         try:
-            resp = SESSION.get(url, params=params, headers=_headers(), timeout=REQUEST_TIMEOUT)
+            resp = SESSION.get(url, params=params, headers=_headers("www.rightmove.co.uk"), timeout=REQUEST_TIMEOUT)
             if resp.status_code != 200:
                 print(f"⚠️ Rightmove API {resp.status_code} for {location_id}")
                 _sleep()
@@ -387,173 +389,182 @@ def filter_rightmove(properties: List[Dict], area: str) -> List[Dict]:
             continue
     return results
 
-# ========= Zoopla (Playwright with residential proxy) =========
-def build_zoopla_urls() -> Dict[str, str]:
-    cfg = SEARCH_URLS.get("zoopla", {})
-    if cfg:
-        return cfg
-    # Not expected to hit (we provided explicit URLs), but just in case:
-    return {area: f"https://www.zoopla.co.uk/to-rent/property/{area.lower().replace(' ', '-')}/"
-            for area in LOCATION_IDS.keys()}
+# ========= Zoopla (Playwright + HTML fallback) ================================
 
-def get_playwright_proxy_from_env() -> Optional[Dict[str, str]]:
-    url = os.getenv("ZOOPLA_PROXY", "").strip()
-    if not url:
-        return None
-    p = urlparse(url)
-    if not (p.scheme and p.hostname and p.port):
-        print("⚠️ Invalid ZOOPLA_PROXY format; expected http://user:pass@host:port")
-        return None
-    server = f"{p.scheme}://{p.hostname}:{p.port}"
-    proxy = {"server": server}
-    if p.username:
-        proxy["username"] = p.username
-    if p.password:
-        proxy["password"] = p.password
-    return proxy
+async def _launch_browser(pw):
+    # Try system Chromium path first (Nixpacks often installs here)
+    system_chromium = (
+        next(iter(glob.glob("/root/.nix-profile/bin/chromium")), None)
+        or next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium")), None)
+        or next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium-browser")), None)
+    )
+    browser = None
+    if system_chromium:
+        print(f"Using system Chromium: {system_chromium}")
+        proxy_opt = None
+        if ZOOPLA_PROXY:
+            proxy_opt = {"server": ZOOPLA_PROXY}
+        browser = await pw.chromium.launch(
+            headless=True,
+            executable_path=system_chromium,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            proxy=proxy_opt
+        )
+        return browser
 
-async def extract_zoopla_links_pw(page: Page) -> List[str]:
-    """
-    Try a few selectors to collect property links.
-    """
-    links: List[str] = []
+    # Fall back to Playwright’s bundled chromium (requires playwright install in image)
+    proxy_opt = None
+    if ZOOPLA_PROXY:
+        proxy_opt = {"server": ZOOPLA_PROXY}
+    browser = await pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"], proxy=proxy_opt)
+    return browser
 
-    # Primary: anchors containing '/to-rent/details/' (desktop)
-    els = await page.query_selector_all("a[href*='/to-rent/details/']")
-    for el in els:
-        href = await el.get_attribute("href")
-        if href and "/to-rent/details/" in href:
-            abs_url = href if href.startswith("http") else urljoin("https://www.zoopla.co.uk", href)
-            links.append(abs_url)
-
-    # Mobile often uses the same pattern; if needed, add more selectors here.
-
-    # De-dup and cap
-    dedup = []
-    seen = set()
-    for u in links:
-        if u not in seen:
-            seen.add(u)
-            dedup.append(u)
-    return dedup[:60]
-
-async def fetch_zoopla_playwright(context: BrowserContext, url: str, area: str) -> List[Dict]:
-    """
-    Navigate with a mobile UA (m.zoopla), then parse list cards for price, beds, address.
-    """
+async def fetch_zoopla_playwright(url: str, area: str) -> List[Dict]:
     listings: List[Dict] = []
-    page = await context.new_page()
-    await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
-
-    # Light resource blocking
-    async def route_handler(route):
-        rurl = route.request.url
-        if any(ext in rurl for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf", ".otf")):
-            await route.abort()
-        else:
-            await route.continue_()
-    await page.route("**/*", route_handler)
-
-    # Prefer mobile site
-    mobile_url = re.sub(r"^https://www\.zoopla\.co\.uk", "https://m.zoopla.co.uk", url)
-    tries = 3
-    html = None
-    for attempt in range(1, tries + 1):
-        try:
-            await page.goto(mobile_url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_load_state("domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(1200)
-            html = await page.content()
-            break
-        except Exception as e:
-            print(f"⚠️ Zoopla attempt {attempt}/{tries} failed for {mobile_url}: {e}")
-            try:
-                await page.close()
-            except Exception:
-                pass
-            page = await context.new_page()
-            await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
-            await page.route("**/*", route_handler)
-
-    if not html:
-        try:
-            await page.close()
-        except Exception:
-            pass
-        return []
-
-    # Extract links with Playwright DOM for robustness
     try:
-        links = await extract_zoopla_links_pw(page)
-        print(f"🔎 Zoopla {area}: PW found {len(links)} links")
-    except Exception:
-        links = []
+        pw = await async_playwright().start()
+        browser = await _launch_browser(pw)
+        context = await browser.new_context(
+            locale="en-GB",
+            user_agent=random.choice(UA_POOL),
+            viewport={"width": 1366, "height": 900},
+        )
 
-    # If PW returns 0, also parse page HTML via BeautifulSoup as a fallback
-    if not links:
+        page = await context.new_page()
+
+        # Block heavy assets
+        async def route_handler(route):
+            if any(ext in route.request.url for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf", ".otf")):
+                await route.abort()
+            else:
+                await route.continue_()
+        await page.route("**/*", route_handler)
+
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(1500)
+
+        # Click cookie banner if present
         try:
-            soup = BeautifulSoup(html, "lxml")
-            anchors = soup.select("a[href*='/to-rent/details/']")
-            for a in anchors:
-                href = a.get("href") or ""
-                if "/to-rent/details/" in href:
-                    abs_url = href if href.startswith("http") else urljoin("https://www.zoopla.co.uk", href)
-                    links.append(abs_url)
+            await page.click("button:has-text('Accept all')", timeout=3000)
         except Exception:
             pass
-        print(f"🔁 Zoopla {area}: fallback found {len(links)} links")
 
-    # For each link, build listing (lightweight parse from card text if available)
+        # Try client-rendered list links
+        links = set()
+        # Newer Zoopla marks listing anchors with /to-rent/details/
+        for sel in ["a[href*='/to-rent/details/']", "a[href*='/to-rent/property/']", "a[href*='/to-rent/']"]:
+            anchors = await page.eval_on_selector_all(sel, "els => els.map(e => e.href)")
+            for a in anchors or []:
+                if "/to-rent/" in a:
+                    links.add(a)
+
+        print(f"🔎 Zoopla {area}: PW found {len(links)} links")
+
+        html = await page.content()
+        soup = BeautifulSoup(html, "lxml")
+        cards = soup.select("a[href*='/to-rent/details/'], a[href*='/to-rent/property/']")
+        # Parse ~50 items max
+        seen = set()
+        for a in cards[:50]:
+            href = a.get("href") or ""
+            abs_url = href if href.startswith("http") else urljoin("https://www.zoopla.co.uk", href)
+            if abs_url in seen:
+                continue
+            seen.add(abs_url)
+            text = a.get_text(" ", strip=True)
+
+            # Peek price/address near anchor
+            parent = a.find_parent()
+            price_txt, address = "", ""
+            if parent:
+                parent_text = parent.get_text(" ", strip=True).lower()
+                m_price = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per week|per month)", parent_text)
+                if m_price:
+                    price_txt = m_price.group(0)
+                addr_el = parent.find(string=re.compile(r"[A-Za-z].*,"))
+                if addr_el:
+                    address = str(addr_el).strip()
+
+            amt, freq = parse_price_text(price_txt)
+            rent_pcm = to_pcm(amt, freq)
+            mb = re.search(r"(\d+)\s*bed", text.lower())
+            beds = int(mb.group(1)) if mb else MIN_BEDS
+            if beds < MIN_BEDS or beds > MAX_BEDS:
+                continue
+            if rent_pcm is not None and rent_pcm < MIN_RENT:
+                continue
+            rent_pcm = rent_pcm if rent_pcm is not None else MIN_RENT
+            baths = max(MIN_BATHS, 1)
+
+            p = calculate_profits(rent_pcm, area, beds)
+            p70 = p["profit_70"]
+            score10 = round(max(0, min(10, (p70 / GOOD_PROFIT_TARGET) * 10)), 1)
+            rag = "🟢" if p70 >= GOOD_PROFIT_TARGET else ("🟡" if p70 >= GOOD_PROFIT_TARGET * 0.7 else "🔴")
+
+            listings.append({
+                "id": norm_id("zoopla", abs_url),
+                "source": "zoopla",
+                "area": area,
+                "address": address or "Unknown",
+                "rent_pcm": rent_pcm,
+                "bedrooms": beds,
+                "bathrooms": baths,
+                "propertySubType": "Property",
+                "url": abs_url,
+                "night_rate": p["night_rate"],
+                "occ_rate": p["occ_rate"],
+                "bills": p["total_bills"],
+                "profit_50": p["profit_50"],
+                "profit_70": p70,
+                "profit_100": p["profit_100"],
+                "target_profit_70": GOOD_PROFIT_TARGET,
+                "score10": score10,
+                "rag": rag,
+            })
+
+        await context.close()
+        await browser.close()
+        await pw.stop()
+    except Exception as e:
+        print(f"⚠️ Zoopla Playwright error: {e}")
+    return listings
+
+def fetch_zoopla_html(url: str, area: str) -> List[Dict]:
+    soup = get_soup(url, host_hint="www.zoopla.co.uk", use_proxy=bool(ZOOPLA_PROXY))
+    if not soup:
+        return []
+    listings: List[Dict] = []
+
+    anchors = soup.select("a[href*='/to-rent/details/'], a[href*='/to-rent/property/']")
     seen = set()
-    for abs_url in links[:60]:
+    for a in anchors[:50]:
+        href = a.get("href") or ""
+        abs_url = href if href.startswith("http") else urljoin("https://www.zoopla.co.uk", href)
         if abs_url in seen:
             continue
         seen.add(abs_url)
 
-        # Try to infer price/beds/address by inspecting the listing card on the search page
-        # (We already have the page HTML; use soup again.)
-        # This is heuristic; Zoopla’s HTML varies.
-        price_txt, address, beds = "", "", None
-        try:
-            # find the anchor node and inspect its parent
-            await page.goto(abs_url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(700)
-            lhtml = await page.content()
-            lsoup = BeautifulSoup(lhtml, "lxml")
-            text = lsoup.get_text(" ", strip=True).lower()
+        # Try to harvest basic info from surrounding card
+        parent = a.find_parent()
+        price_txt, address, text = "", "", a.get_text(" ", strip=True)
 
-            # price
-            mprice = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per month|per week)", text)
-            price_txt = mprice.group(0) if mprice else ""
-
-            # beds
-            mb = re.search(r"(\d+)\s*bed", text)
-            beds = int(mb.group(1)) if mb else None
-
-            # address (best-effort)
-            addr = lsoup.find(attrs={"data-testid": re.compile("address", re.I)}) or lsoup.find("address")
-            if addr:
-                address = addr.get_text(" ", strip=True)
-            else:
-                # generic guess
-                maddr = re.search(r"[A-Za-z].+,\s*[A-Za-z].+", lsoup.get_text("\n", strip=True))
-                if maddr:
-                    address = maddr.group(0).strip()
-        except Exception:
-            # if we can’t visit details page (rate-limited), just skip
-            continue
+        if parent:
+            parent_text = parent.get_text(" ", strip=True).lower()
+            m_price = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per week|per month)", parent_text)
+            if m_price:
+                price_txt = m_price.group(0)
+            addr_el = parent.find(string=re.compile(r"[A-Za-z].*,"))
+            if addr_el:
+                address = str(addr_el).strip()
 
         amt, freq = parse_price_text(price_txt)
-        rent_pcm = to_pcm(amt, freq) if amt else None
-        if beds is None:
-            beds = MIN_BEDS
-
-        # Filter
+        rent_pcm = to_pcm(amt, freq)
+        mb = re.search(r"(\d+)\s*bed", text.lower())
+        beds = int(mb.group(1)) if mb else MIN_BEDS
         if beds < MIN_BEDS or beds > MAX_BEDS:
             continue
         if rent_pcm is not None and rent_pcm < MIN_RENT:
             continue
-
         rent_pcm = rent_pcm if rent_pcm is not None else MIN_RENT
         baths = max(MIN_BATHS, 1)
 
@@ -582,87 +593,20 @@ async def fetch_zoopla_playwright(context: BrowserContext, url: str, area: str) 
             "score10": score10,
             "rag": rag,
         })
-
-    try:
-        await page.close()
-    except Exception:
-        pass
     return listings
 
-def zoopla_requests_proxies() -> Optional[Dict[str, str]]:
-    proxy_url = os.getenv("ZOOPLA_PROXY", "").strip()
-    if not proxy_url:
-        return None
-    return {"http": proxy_url, "https": proxy_url}
-
-def fetch_zoopla_html(url: str, area: str) -> List[Dict]:
-    """
-    Optional HTML-only fallback via requests, routed through the same proxy.
-    Expect frequent 403s without residential IPs.
-    """
-    proxies = zoopla_requests_proxies()
-    soup = get_soup(url, mobile=True, proxies=proxies)
-    if not soup:
-        print(f"🔎 Zoopla {area} HTML: 0 links")
-        return []
-    anchors = soup.select("a[href*='/to-rent/details/']")
-    links = []
-    for a in anchors:
-        href = a.get("href") or ""
-        if "/to-rent/details/" in href:
-            abs_url = href if href.startswith("http") else urljoin("https://www.zoopla.co.uk", href)
-            links.append(abs_url)
-    print(f"🔎 Zoopla {area} HTML: {len(links)} links")
-
-    # Build minimal listings (without visiting details pages)
-    listings: List[Dict] = []
-    for abs_url in links[:30]:
-        # heuristics—just pass through with unknown address/beds if we can’t parse
-        beds = MIN_BEDS
-        rent_pcm = MIN_RENT
-        address = "Unknown"
-        p = calculate_profits(rent_pcm, area, beds)
-        p70 = p["profit_70"]
-        score10 = round(max(0, min(10, (p70 / GOOD_PROFIT_TARGET) * 10)), 1)
-        rag = "🟢" if p70 >= GOOD_PROFIT_TARGET else ("🟡" if p70 >= GOOD_PROFIT_TARGET * 0.7 else "🔴")
-        listings.append({
-            "id": norm_id("zoopla", abs_url),
-            "source": "zoopla",
-            "area": area,
-            "address": address,
-            "rent_pcm": rent_pcm,
-            "bedrooms": beds,
-            "bathrooms": max(MIN_BATHS, 1),
-            "propertySubType": "Property",
-            "url": abs_url,
-            "night_rate": p["night_rate"],
-            "occ_rate": p["occ_rate"],
-            "bills": p["total_bills"],
-            "profit_50": p["profit_50"],
-            "profit_70": p70,
-            "profit_100": p["profit_100"],
-            "target_profit_70": GOOD_PROFIT_TARGET,
-            "score10": score10,
-            "rag": rag,
-        })
-    return listings
-
-# ========= OnTheMarket (requests) =========
+# ========= OnTheMarket (requests) ============================================
 def build_otm_urls() -> Dict[str, str]:
-    cfg = SEARCH_URLS.get("onthemarket", {})
-    if cfg:
-        return cfg
-    # Generic area pages; can be swapped for filtered URLs later
     return {area: f"https://www.onthemarket.com/to-rent/property/{area.lower().replace(' ', '-')}/"
             for area in LOCATION_IDS.keys()}
 
 def fetch_otm_from_url(url: str, area: str) -> List[Dict]:
-    soup = get_soup(url)
+    soup = get_soup(url, host_hint="www.onthemarket.com")
     if not soup:
         return []
     listings: List[Dict] = []
     cards = soup.select("[data-testid*=propertyCard], article, li")
-    for card in cards[:60]:
+    for card in cards[:50]:
         a = card.find("a", href=re.compile(r"/details/|/to-rent/property/"))
         if not a:
             continue
@@ -720,22 +664,14 @@ def fetch_otm_from_url(url: str, area: str) -> List[Dict]:
         })
     return listings
 
-# ========= SpareRoom (requests; whole property via saved search) =========
-def build_spareroom_urls() -> Dict[str, str]:
-    cfg = SEARCH_URLS.get("spareroom", {})
-    if cfg:
-        return cfg
-    # Fallback (not ideal): keyword + whole-property filter
-    return {area: f"https://www.spareroom.co.uk/flatshare/?search_type=offered&property_type=property&location={quote_plus(area)}"
-            for area in LOCATION_IDS.keys()}
-
+# ========= SpareRoom (requests; whole property via saved search) ==============
 def fetch_spareroom_from_url(url: str, area: str) -> List[Dict]:
-    soup = get_soup(url)
+    soup = get_soup(url, host_hint="www.spareroom.co.uk")
     if not soup:
         return []
     listings: List[Dict] = []
-    cards = soup.select("li.listing-result, .panel-listing-result, .results_content .listing, .panel-listing") or []
-    for c in cards[:50]:
+    cards = soup.select("li.listing-result, .panel-listing-result, .results_content .listing")
+    for c in cards[:40]:
         a = c.find("a", href=True)
         if not a:
             continue
@@ -750,7 +686,7 @@ def fetch_spareroom_from_url(url: str, area: str) -> List[Dict]:
 
         mb = re.search(r"(\d+)\s*bed", text.lower())
         if not mb:
-            continue  # usually room/HMO without clear beds
+            continue
         beds = int(mb.group(1))
         if beds < MIN_BEDS or beds > MAX_BEDS:
             continue
@@ -792,11 +728,12 @@ def fetch_spareroom_from_url(url: str, area: str) -> List[Dict]:
         })
     return listings
 
-# ========= Orchestrator (async) =========
+# ========= Orchestrator (async) ==============================================
+
 async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> List[Dict]:
     new_listings: List[Dict] = []
 
-    # ---- Rightmove (requests) ----
+    # ---- Rightmove ----
     if "rightmove" in SOURCES_ORDER and ENABLE_RIGHTMOVE:
         for area, loc_id in LOCATION_IDS.items():
             print(f"\n📍 [Rightmove] {area}…")
@@ -814,91 +751,39 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
                     continue
                 seen_ids.add(listing["id"])
                 new_listings.append(listing)
-            time.sleep(1.0)
+            _sleep()
 
-    # ---- Zoopla (Playwright + proxy; optional HTML fallback) ----
+    # ---- Zoopla (Playwright → HTML fallback) ----
     if "zoopla" in SOURCES_ORDER and ENABLE_ZOOPLA:
-        urls = build_zoopla_urls()
-        if not HAS_PLAYWRIGHT:
-            print("⚠️ Playwright not installed; cannot run Zoopla. Skipping.")
+        if ZOOPLA_PROXY:
+            print("\n🔗 Using residential proxy for Zoopla.")
         else:
-            print("\n🧭 Launching Playwright for Zoopla…")
-            proxy_cfg = get_playwright_proxy_from_env()
-            if not proxy_cfg:
-                print("⚠️ Zoopla blocked without a residential proxy. Set ZOOPLA_PROXY to enable (e.g. http://user:pass@host:port). Skipping Zoopla this run.")
-            else:
-                pw = await async_playwright().start()
-                browser: Optional[Browser] = None
-                context: Optional[BrowserContext] = None
-                try:
-                    # Use Chromium in containers with --no-sandbox; pass proxy
-                    print("🔗 Using residential proxy for Zoopla.")
-                    browser = await pw.chromium.launch(
-                        headless=True,
-                        args=["--no-sandbox", "--disable-dev-shm-usage"],
-                        proxy=proxy_cfg,
-                    )
-                    context = await browser.new_context(
-                        locale="en-GB",
-                        user_agent=MOBILE_UA,  # mobile UA tends to be easier
-                    )
+            print("\n⚠️ Zoopla is much more reliable with a residential proxy. Proceeding without one…")
 
-                    for area, url in urls.items():
-                        print(f"\n📍 [Zoopla] {area} → {url}")
-                        listings = await fetch_zoopla_playwright(context, url, area)
-                        for listing in listings:
-                            is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
-                            if is_dup:
-                                preferred = choose_preferred(existing, listing)
-                                cross_registry[key] = preferred
-                                if preferred is existing:
-                                    continue
-                            else:
-                                cross_registry[key] = listing
-                            if listing["id"] in seen_ids:
-                                continue
-                            seen_ids.add(listing["id"])
-                            new_listings.append(listing)
-                        await asyncio.sleep(1.0)
-                except Exception as e:
-                    print(f"⚠️ Zoopla Playwright error: {e}")
-                finally:
-                    try:
-                        if context:
-                            await context.close()
-                    except Exception:
-                        pass
-                    try:
-                        if browser:
-                            await browser.close()
-                    except Exception:
-                        pass
-                    try:
-                        await pw.stop()
-                    except Exception:
-                        pass
-
-            # Optional Zoopla HTML fallback via requests (also uses the same proxy)
-            if ZOOPLA_HTML_FALLBACK:
-                for area, url in urls.items():
-                    print(f"\n📍 [Zoopla] {area} (HTML) → {url}")
+        for area, urls in Z_SEARCH.items():
+            for url in urls:
+                print(f"\n📍 [Zoopla] {area} → {url}")
+                listings = await fetch_zoopla_playwright(url, area)
+                if not listings:
+                    # Playwright failed or returned nothing → try HTML with proxy + strong headers
                     listings = fetch_zoopla_html(url, area)
-                    for listing in listings:
-                        is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
-                        if is_dup:
-                            preferred = choose_preferred(existing, listing)
-                            cross_registry[key] = preferred
-                            if preferred is existing:
-                                continue
-                        else:
-                            cross_registry[key] = listing
-                        if listing["id"] in seen_ids:
-                            continue
-                        seen_ids.add(listing["id"])
-                        new_listings.append(listing)
-                    time.sleep(0.6)
 
-    # ---- OnTheMarket (requests) ----
+                for listing in listings:
+                    is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
+                    if is_dup:
+                        preferred = choose_preferred(existing, listing)
+                        cross_registry[key] = preferred
+                        if preferred is existing:
+                            continue
+                    else:
+                        cross_registry[key] = listing
+                    if listing["id"] in seen_ids:
+                        continue
+                    seen_ids.add(listing["id"])
+                    new_listings.append(listing)
+                await asyncio.sleep(0.6)
+
+    # ---- OnTheMarket ----
     if ("onthemarket" in SOURCES_ORDER or "otm" in SOURCES_ORDER) and ENABLE_OTM:
         urls = build_otm_urls()
         for area, url in urls.items():
@@ -916,12 +801,11 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
                     continue
                 seen_ids.add(listing["id"])
                 new_listings.append(listing)
-            time.sleep(1.0)
+            _sleep()
 
-    # ---- SpareRoom (requests) ----
+    # ---- SpareRoom ----
     if "spareroom" in SOURCES_ORDER and ENABLE_SPAREROOM:
-        urls = build_spareroom_urls()
-        for area, url in urls.items():
+        for area, url in SPAREROOM_URLS.items():
             print(f"\n📍 [SpareRoom] {area}…")
             for listing in fetch_spareroom_from_url(url, area):
                 is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
@@ -936,15 +820,16 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
                     continue
                 seen_ids.add(listing["id"])
                 new_listings.append(listing)
-            time.sleep(1.0)
+            _sleep()
 
     return new_listings
 
-# ========= Main loop =========
+# ========= Main loop ==========================================================
+
 async def main() -> None:
     print("🚀 Scraper started!")
-    seen_ids: Set[str] = set()          # prevents re-sending same ID in this process
-    cross_seen: Dict[tuple, Dict] = {}  # cross-site dedupe registry
+    seen_ids: Set[str] = set()
+    cross_seen: Dict[tuple, Dict] = {}
 
     while True:
         try:
@@ -962,8 +847,8 @@ async def main() -> None:
                 )
                 post_to_webhook(listing)
 
-            # Jittered hourly sleep (you asked to keep this)
-            sleep_duration = 3600 + random.randint(-300, 300)
+            # Sleep ~1 hour (no round-robin jitter needed beyond this)
+            sleep_duration = 3600
             print(f"💤 Sleeping {sleep_duration} seconds…")
             await asyncio.sleep(sleep_duration)
 
