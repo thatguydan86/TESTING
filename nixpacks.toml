@@ -1,9 +1,10 @@
 # nixpacks.toml
 
 [phases.setup]
-# Python + pip + all headless browser deps that Playwright needs
 nixPkgs = [
   "python311", "python311Packages.pip",
+  "chromium", "firefox",                       # ← system browsers from Nix
+  # headless deps
   "glib", "nss", "nspr", "dbus", "at-spi2-core", "atk",
   "cups", "alsa-lib",
   "freetype", "fontconfig", "pango", "cairo", "gdk-pixbuf", "gtk3",
@@ -14,7 +15,5 @@ nixPkgs = [
 ]
 
 [start]
-# 1) tell Playwright to skip the Debian/Ubuntu host check (Nix has the libs)
-# 2) download Chromium+Firefox into the default cache (no path hacks)
-# 3) run the scraper
-cmd = "export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1; echo '🔧 Installing Playwright browsers…'; python -m playwright install chromium firefox || true; ls -lah /root/.cache/ms-playwright || true; python -u main.py"
+# Use system browsers; no playwright install step.
+cmd = "python -u main.py"
