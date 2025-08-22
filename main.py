@@ -363,53 +363,96 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     page = await context.new_page()
     await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
 
+    # Block heavy assets
     async def route_handler(route):
-        if any(ext in route.request.url for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf", ".otf")):
+        u = route.request.url
+        if any(x in u for x in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf", ".otf")):
             await route.abort()
         else:
             await route.continue_()
     await page.route("**/*", route_handler)
 
-    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(1200)
+    # Load + wait for network to settle (Zoopla lazy-loads)
+    await page.goto(url, wait_until="networkidle", timeout=90000)
 
-    html = await page.content()
-    soup = BeautifulSoup(html, "lxml")
-    anchors = soup.select("a[href*='/to-rent/details/']")
-    seen = set()
+    # Try to accept cookie banners (inline)
+    try:
+        await page.locator("button:has-text('Accept all')").first.click(timeout=3000)
+    except Exception:
+        pass
+    # Iframe-based consent (e.g., CMP variants)
+    try:
+        for f in page.frames:
+            try:
+                await f.locator("button:has-text('Accept')").first.click(timeout=1500)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
-    for a in anchors[:50]:
-        href = a.get("href") or ""
-        if "/to-rent/details" not in href:
-            continue
-        abs_url = href if href.startswith("http") else urljoin("https://www.zoopla.co.uk", href)
-        if abs_url in seen:
-            continue
-        seen.add(abs_url)
+    # Trigger lazy loading
+    await page.wait_for_timeout(800)
+    for _ in range(6):
+        await page.mouse.wheel(0, 2000)
+        await page.wait_for_timeout(450)
 
-        card_text = a.get_text(" ", strip=True) or ""
-        parent = a.find_parent()
-        price_txt, address = "", ""
-        if parent:
-            parent_text = parent.get_text(" ", strip=True).lower()
-            m_price = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per week|per month)", parent_text)
-            if m_price:
-                price_txt = m_price.group(0)
-            addr_el = parent.find(string=re.compile(r"[A-Za-z].*,"))
-            if addr_el:
-                address = str(addr_el).strip()
+    # Collect listing links via JS
+    try:
+        hrefs: List[str] = await page.eval_on_selector_all(
+            "a[href*='/to-rent/details/']",
+            "els => Array.from(new Set(els.map(e => e.href)))"
+        )
+    except Exception:
+        hrefs = []
 
+    print(f"🔎 Zoopla {area}: found {len(hrefs)} listing links at {url}")
+
+    # Fallback to HTML parse if needed
+    if not hrefs:
+        html = await page.content()
+        soup = BeautifulSoup(html, "lxml")
+        hrefs = list({
+            (a.get("href") if (a.get("href") or "").startswith("http")
+             else urljoin("https://www.zoopla.co.uk", a.get("href") or ""))
+            for a in soup.select("a[href*='/to-rent/details/']")
+        })
+        print(f"🔁 Zoopla {area}: fallback found {len(hrefs)} links")
+
+    # Build listing objects
+    for abs_url in hrefs[:60]:
+        parent_text = ""
+        try:
+            el = await page.query_selector(f"a[href='{abs_url}']")
+            if el:
+                parent = await el.evaluate_handle("el => el.closest('article, li, div') || el.parentElement")
+                try:
+                    parent_text = (await (await parent.get_property('innerText')).json_value()) or ""
+                except Exception:
+                    parent_text = ""
+        except Exception:
+            parent_text = ""
+
+        text = parent_text or ""
+        # price
+        m_price = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per week|per month)", text.lower())
+        price_txt = m_price.group(0) if m_price else ""
         amt, freq = parse_price_text(price_txt)
         rent_pcm = to_pcm(amt, freq)
-        mb = re.search(r"(\d+)\s*bed", card_text.lower())
+        # beds
+        mb = re.search(r"(\d+)\s*bed", text.lower())
         beds = int(mb.group(1)) if mb else MIN_BEDS
+        # address
+        addr_m = re.search(r"[A-Za-z].*,.*", text)
+        address = addr_m.group(0).strip() if addr_m else ""
 
+        # Filters
         if beds < MIN_BEDS or beds > MAX_BEDS:
             continue
         if rent_pcm is not None and rent_pcm < MIN_RENT:
             continue
-        rent_pcm = rent_pcm if rent_pcm is not None else MIN_RENT
+
         baths = max(MIN_BATHS, 1)
+        rent_pcm = rent_pcm if rent_pcm is not None else MIN_RENT
 
         p = calculate_profits(rent_pcm, area, beds)
         p70 = p["profit_70"]
@@ -644,6 +687,7 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
             for area, url in urls.items():
                 print(f"\n📍 [Zoopla] {area}…")
                 listings = await fetch_zoopla_playwright(context, url, area)
+                print(f"🧮 Zoopla {area}: parsed {len(listings)} listings")  # ← optional debug
                 for listing in listings:
                     is_dup, existing, key = is_cross_duplicate(listing, cross_registry)
                     if is_dup:
