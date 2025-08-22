@@ -20,7 +20,7 @@ print("🚀 Starting RentRadar…")
 # ========= Config =========
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://hook.eu2.make.com/6k1jjsv0khxbqbfplzv5ibt4d1wh3dwj")
 
-# Enable/disable sources (deterministic, no round robin)
+# Enable/disable sources (deterministic)
 ENABLE_RIGHTMOVE = os.getenv("ENABLE_RIGHTMOVE", "true").lower() == "true"
 ENABLE_ZOOPLA    = os.getenv("ENABLE_ZOOPLA", "false").lower() == "true"
 ENABLE_OTM       = os.getenv("ENABLE_OTM", "false").lower() == "true"
@@ -39,14 +39,15 @@ LOCATION_IDS: Dict[str, str] = {
     "Bridgwater": "REGION^212",
 }
 
-# Optional hardcoded search URLs (we still support SpareRoom saved search here)
+# Optional hardcoded search URLs
 SEARCH_URLS: Dict[str, Dict[str, List[str]]] = {
+    # SpareRoom sample saved search (whole property)
     "spareroom": {
         "Liverpool": ["https://www.spareroom.co.uk/flatshare/?search_id=1381621815&mode=list"],
     }
 }
 
-# >>> Option B: HARDCODED ZOOPLA URLS (area keys must match LOCATION_IDS) <<<
+# >>> Option B: HARDCODED ZOOPLA URLS (keys must match LOCATION_IDS) <<<
 SEARCH_URLS["zoopla"] = {
     "Lincoln": [
         "https://www.zoopla.co.uk/to-rent/houses/lincoln/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&price_frequency=per_month&price_max=1250&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Lincoln%2C%20Lincolnshire&search_source=to-rent"
@@ -352,7 +353,7 @@ def filter_rightmove(properties: List[Dict], area: str) -> List[Dict]:
             continue
     return results
 
-# ========= Zoopla helpers =========
+# ========= Zoopla helpers & scraper =========
 def zoopla_area_url_groups() -> Dict[str, List[str]]:
     """Use hardcoded SEARCH_URLS['zoopla'] if present; else generic area pages."""
     cfg = SEARCH_URLS.get("zoopla", {})
@@ -386,7 +387,8 @@ async def zoopla_new_context(browser):
 async def zoopla_block_assets(page):
     async def route_handler(route):
         r = route.request
-        if r.resource_type in {"image", "font", "media", "stylesheet"}:
+        # Only block heavy assets; allow stylesheets/XHR so the app can render
+        if r.resource_type in {"image", "font", "media"}:
             return await route.abort()
         return await route.continue_()
     await page.route("**/*", route_handler)
@@ -402,56 +404,57 @@ async def zoopla_accept_cookies(page):
         pass
 
 async def zoopla_extract_links_from_page(page) -> List[str]:
-    links = await page.eval_on_selector_all(
-        "a[href*='/to-rent/details/']",
-        "els => els.map(e => e.href)"
-    )
+    # 1) Broad anchors
+    anchors = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+    links = [u for u in anchors if "/to-rent/details/" in u]
     if links:
         return list(dict.fromkeys(links))
+
+    # 2) Possible data-testid anchors
     try:
-        json_links = await page.evaluate("""
-        () => {
-          const out = [];
-          const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
-          for (const s of scripts) {
-            try {
-              const j = JSON.parse(s.textContent || "null");
-              if (!j) continue;
-              const arr = Array.isArray(j) ? j : [j];
-              for (const node of arr) {
-                if (node && node.itemListElement && Array.isArray(node.itemListElement)) {
-                  for (const it of node.itemListElement) {
-                    const u = it && (it.item && (it.item['@id'] || it.item.url));
-                    if (u && typeof u === 'string' && u.includes('/to-rent/details/')) out.push(u);
-                  }
-                }
-              }
-            } catch {}
-          }
-          return out;
-        }
-        """)
-        if json_links:
-            return list(dict.fromkeys(json_links))
+        testid_links = await page.eval_on_selector_all(
+            "a[data-testid*='listing'], a[data-testid*='details']",
+            "els => els.map(e => e.href)"
+        )
+        testid_links = [u for u in (testid_links or []) if "/to-rent/details/" in u]
+        if testid_links:
+            return list(dict.fromkeys(testid_links))
     except Exception:
         pass
-    anchors = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
-    return [u for u in anchors if "/to-rent/details/" in u]
 
-def zoopla_parse_card_text_to_fields(card_text: str, parent_text: str) -> Tuple[Optional[int], Optional[int], str]:
-    price_match = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per week|per month)", parent_text.lower())
-    price_txt = price_match.group(0) if price_match else ""
-    amt, freq = parse_price_text(price_txt)
-    rent_pcm = to_pcm(amt, freq)
-    mb = re.search(r"(\d+)\s*bed", card_text.lower())
-    beds = int(mb.group(1)) if mb else None
-    return rent_pcm, beds, price_txt
+    # 3) Parse Next.js bootstrap payload
+    try:
+        next_data = await page.eval_on_selector("script#__NEXT_DATA__", "el => el.textContent")
+        if not next_data:
+            next_data = await page.evaluate(
+                "(() => (window.__NEXT_DATA__ ? JSON.stringify(window.__NEXT_DATA__) : null))()"
+            )
+        if next_data:
+            raw_found = re.findall(r'"/to-rent/details/\d+/?', next_data)
+            raw_found = [s.strip('"') for s in raw_found]
+            absd = [u if u.startswith("http") else ("https://www.zoopla.co.uk" + u) for u in raw_found]
+            if absd:
+                return list(dict.fromkeys(absd))
+    except Exception:
+        pass
+
+    # 4) Last resort: scan whole HTML
+    try:
+        html = await page.content()
+        raw_found = re.findall(r'https?://www\.zoopla\.co\.uk/to-rent/details/\d+/?|/to-rent/details/\d+/?', html)
+        absd = [u if u.startswith("http") else ("https://www.zoopla.co.uk" + u) for u in raw_found]
+        if absd:
+            return list(dict.fromkeys(absd))
+    except Exception:
+        pass
+
+    return []
 
 async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     listings: List[Dict] = []
     page = await context.new_page()
-    page.set_default_timeout(30000)
-    page.set_default_navigation_timeout(30000)
+    page.set_default_timeout(40000)
+    page.set_default_navigation_timeout(40000)
     await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
     await zoopla_block_assets(page)
 
@@ -462,15 +465,39 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
         await page.close()
         return listings
 
-    await zoopla_accept_cookies(page)
+    # Cookies (if any)
+    try:
+        await zoopla_accept_cookies(page)
+    except Exception:
+        pass
 
+    # Allow hydration/network to settle a bit
+    try:
+        await page.wait_for_load_state("networkidle", timeout=6000)
+    except Exception:
+        pass
+
+    # Click "Show more/Load more" if available
     for _ in range(3):
-        await page.wait_for_timeout(600)
         try:
-            await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+            btn = page.locator("button:has-text('Show more'), button:has-text('Load more')")
+            if await btn.count() > 0:
+                await btn.first.click(timeout=1000)
+                await page.wait_for_load_state("networkidle", timeout=4000)
+            else:
+                break
         except Exception:
             break
 
+    # Scroll a few times to trigger lazy-load
+    for _ in range(5):
+        try:
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(800)
+        except Exception:
+            break
+
+    # Extract links (robust)
     try:
         links = await zoopla_extract_links_from_page(page)
     except Exception as e:
@@ -480,41 +507,25 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     print(f"🔎 Zoopla {area}: found {len(links)} listing links at {url}")
 
     if not links:
-        await page.wait_for_timeout(1500)
+        # One more small wait + retry
         try:
+            await page.wait_for_timeout(1500)
             links = await zoopla_extract_links_from_page(page)
         except Exception:
             links = []
         print(f"🔁 Zoopla {area}: fallback found {len(links)} links")
 
-    html = await page.content()
-    soup = BeautifulSoup(html, "lxml")
-
+    # Build minimal listings (defaults, economics applied).
     seen = set()
-    for abs_url in links[:50]:
+    for abs_url in links[:60]:
         if abs_url in seen:
             continue
         seen.add(abs_url)
 
-        a = soup.find("a", href=lambda h: h and abs_url.endswith(h) if abs_url.startswith("http") else h == abs_url)
-        parent_text = ""
-        card_text = ""
-        if a:
-            card_text = a.get_text(" ", strip=True) or ""
-            par = a.find_parent()
-            if par:
-                parent_text = par.get_text(" ", strip=True)
-
-        rent_pcm, beds, _ = zoopla_parse_card_text_to_fields(card_text, parent_text)
-        if beds is None:
-            beds = MIN_BEDS
-        if beds < MIN_BEDS or beds > MAX_BEDS:
-            continue
-        if rent_pcm is not None and rent_pcm < MIN_RENT:
-            continue
-        rent_pcm = rent_pcm if rent_pcm is not None else MIN_RENT
-
+        beds = MIN_BEDS
+        rent_pcm = MIN_RENT
         baths = max(MIN_BATHS, 1)
+
         p = calculate_profits(rent_pcm, area, beds)
         p70 = p["profit_70"]
         score10 = round(max(0, min(10, (p70 / GOOD_PROFIT_TARGET) * 10)), 1)
@@ -617,7 +628,7 @@ def fetch_otm_from_url(url: str, area: str) -> List[Dict]:
         })
     return listings
 
-# ========= SpareRoom (requests; whole property via saved search) =========
+# ========= SpareRoom (requests) =========
 def build_spareroom_urls() -> Dict[str, str]:
     cfg = SEARCH_URLS.get("spareroom", {})
     if cfg:
@@ -723,7 +734,7 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
             context = await zoopla_new_context(browser)
 
             area_urls = zoopla_area_url_groups()
-            # ensure we have entries for all areas
+            # ensure entries for all areas
             for area in LOCATION_IDS.keys():
                 area_urls.setdefault(area, [f"https://www.zoopla.co.uk/to-rent/property/{area.lower().replace(' ', '-')}/"])
 
