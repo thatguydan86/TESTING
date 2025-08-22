@@ -617,12 +617,33 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
         browser = None
         try:
             browser = await pw.firefox.launch(headless=True)
-            print("Zoopla via Firefox")
-        except Exception as e:
-            print(f"Firefox launch failed ({e}); falling back to Chromium…")
-            browser = await pw.chromium.launch(headless=True)
-            print("Zoopla via Chromium")
-        context = await browser.new_context(locale="en-GB")
+            import glob  # (at top of file, if not already imported)
+
+print("\n🧭 Launching Playwright for Zoopla…")
+pw = await async_playwright().start()
+
+# Find Nix system browsers
+system_firefox = next(iter(glob.glob("/nix/store/*-firefox-*/bin/firefox")), None)
+# chromium can be 'chromium' or 'chromium-browser' depending on build
+system_chromium = (next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium")), None)
+                   or next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium-browser")), None))
+
+browser = None
+try:
+    if not system_firefox:
+        raise RuntimeError("No system Firefox found")
+    print(f"Using system Firefox: {system_firefox}")
+    browser = await pw.firefox.launch(headless=True, executable_path=system_firefox)
+except Exception as e_ff:
+    print(f"System Firefox failed ({e_ff}); trying system Chromium…")
+    if not system_chromium:
+        raise RuntimeError("No system Chromium found")
+    print(f"Using system Chromium: {system_chromium}")
+    # --no-sandbox is typically required in containers
+    browser = await pw.chromium.launch(headless=True, executable_path=system_chromium, args=["--no-sandbox"])
+
+context = await browser.new_context(locale="en-GB")
+
         urls = build_zoopla_urls()
         for area, url in urls.items():
             print(f"\n📍 [Zoopla] {area}…")
