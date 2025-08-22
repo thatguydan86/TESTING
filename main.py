@@ -5,7 +5,6 @@ import asyncio
 import time
 import random
 import re
-import json
 import glob
 import hashlib
 import difflib
@@ -359,8 +358,7 @@ def filter_rightmove(properties: List[Dict], area: str) -> List[Dict]:
             continue
     return results
 
-# ========= Zoopla (Playwright with stealth + Next.js parsing) =========
-
+# ========= Zoopla (Playwright with stealth + hardened extraction) =========
 def build_zoopla_urls() -> Dict[str, List[str]]:
     cfg = SEARCH_URLS.get("zoopla", {})
     out: Dict[str, List[str]] = {}
@@ -421,20 +419,20 @@ async def zoopla_accept_cookies(page):
                 await page.wait_for_timeout(400)
                 break
     except Exception:
-    # ignore cookie failures
         pass
 
 async def zoopla_extract_links_from_dom(page) -> List[str]:
-    """Collect listing links using several selector strategies (fixed awaits)."""
+    """Collect listing links using several selector strategies (hardened)."""
     links: List[str] = []
 
-    # Strategy A: common card link testids + hrefs
+    # Strategy A: modern card link selectors
     try:
         sel_candidates = [
             "a[data-testid='listing-card-link']",
             "a[data-testid='regular-listing-card-link']",
             "article[data-testid='regular-listing'] a[href]",
             "li[data-testid*='regular-listing'] a[href]",
+            "a:has-text('View details')",
             "a[href*='/to-rent/details/']",
         ]
         for sel in sel_candidates:
@@ -445,13 +443,15 @@ async def zoopla_extract_links_from_dom(page) -> List[str]:
     except Exception:
         pass
 
-    # Strategy B: Next.js bootstrap JSON (proper await + try/except)
+    # Strategy B: bootstrap JSON (Next.js / other)
     try:
+        # 1) __NEXT_DATA__ if present
         next_json = None
         try:
             next_json = await page.eval_on_selector("script#__NEXT_DATA__", "el => el.textContent")
         except Exception:
             pass
+        # 2) window.__NEXT_DATA__ if present
         if not next_json:
             try:
                 next_json = await page.evaluate(
@@ -459,24 +459,36 @@ async def zoopla_extract_links_from_dom(page) -> List[str]:
                 )
             except Exception:
                 next_json = None
+        # 3) any JSON script that contains /to-rent/details
+        if not next_json:
+            try:
+                json_candidates = await page.eval_on_selector_all(
+                    "script[type='application/json']",
+                    "els => els.map(e => e.textContent || '')"
+                )
+                for blob in json_candidates or []:
+                    if "/to-rent/details/" in blob:
+                        for m in re.findall(r'"/to-rent/details/\\d+/?', blob):
+                            links.append("https://www.zoopla.co.uk" + m.strip('"'))
+                        for m in re.findall(r'https?:\\/\\/www\\.zoopla\\.co\\.uk\\/to-rent\\/details\\/\\d+\\/?', blob):
+                            links.append(m.replace("\\/", "/"))
+            except Exception:
+                pass
 
         if next_json:
-            # relative paths
             for m in re.findall(r'"/to-rent/details/\\d+/?', next_json):
-                path = m.strip('"')
-                if path:
-                    links.append("https://www.zoopla.co.uk" + path)
-            # absolute urls (escaped)
+                links.append("https://www.zoopla.co.uk" + m.strip('"'))
             for m in re.findall(r'https?:\\/\\/www\\.zoopla\\.co\\.uk\\/to-rent\\/details\\/\\d+\\/?', next_json):
                 links.append(m.replace("\\/", "/"))
     except Exception:
         pass
 
-    # Strategy C: raw HTML regex sweep
+    # Strategy C: final brute-force sweep over all anchors
     try:
-        html = await page.content()
-        for m in re.findall(r'https?://www\\.zoopla\\.co\\.uk/to-rent/details/\\d+/?|/to-rent/details/\\d+/?', html):
-            links.append(m if m.startswith("http") else ("https://www.zoopla.co.uk" + m))
+        hrefs_all = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+        for u in hrefs_all or []:
+            if u and "/to-rent/details/" in u:
+                links.append(u)
     except Exception:
         pass
 
@@ -486,6 +498,9 @@ async def zoopla_extract_links_from_dom(page) -> List[str]:
     for u in links:
         if not u:
             continue
+        u = u if u.startswith("http") else ("https://www.zoopla.co.uk" + u)
+        if u.endswith("/") and "/to-rent/details/" in u:
+            u = u.rstrip("/")
         if "/to-rent/details/" not in u:
             continue
         if u in seen:
@@ -497,12 +512,13 @@ async def zoopla_extract_links_from_dom(page) -> List[str]:
 async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     listings: List[Dict] = []
     page = await context.new_page()
-    page.set_default_timeout(45000)
-    page.set_default_navigation_timeout(45000)
+    page.set_default_timeout(60000)
+    page.set_default_navigation_timeout(60000)
     await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
 
     try:
-        await page.goto(url, wait_until="domcontentloaded")
+        # Zoopla needs XHRs — wait for networkidle, not just DOM
+        await page.goto(url, wait_until="networkidle")
         await zoopla_accept_cookies(page)
 
         # Wait for possible results containers to appear
@@ -512,26 +528,22 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
             "main [data-testid*='listing']",
             "main article",
         ]
-        waited = False
         for sel in selectors_to_wait:
             try:
-                await page.wait_for_selector(sel, timeout=8000)
-                waited = True
+                await page.wait_for_selector(sel, timeout=7000)
                 break
             except Exception:
                 continue
-        if not waited:
-            await page.wait_for_timeout(1500)
 
-        # Try to reach end of list: scroll + click “show more”
-        for _ in range(8):
+        # scroll & try “Show/Load more” (hydrate and expand)
+        for _ in range(10):
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(700)
+            await page.wait_for_timeout(800)
             try:
                 btn = page.locator("button:has-text('Show more'), button:has-text('Load more')")
                 if await btn.count():
-                    await btn.first.click(timeout=1200)
-                    await page.wait_for_load_state("networkidle", timeout=6000)
+                    await btn.first.click(timeout=1500)
+                    await page.wait_for_load_state("networkidle", timeout=8000)
             except Exception:
                 pass
 
@@ -539,12 +551,20 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
         print(f"🔎 Zoopla {area}: found {len(links)} listing links at {url}")
 
         if not links:
-            await page.wait_for_timeout(1800)
+            # One more chance after a pause + tiny scroll back up
+            await page.wait_for_timeout(2000)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
+            await page.wait_for_timeout(800)
             links = await zoopla_extract_links_from_dom(page)
             print(f"🔁 Zoopla {area}: fallback found {len(links)} links")
 
-        # Build minimal listings now (fast path).
-        for abs_url in links[:80]:
+        if not links:
+            print(f"🧮 Zoopla {area}: parsed 0 listings")
+            await page.close()
+            return []
+
+        # Minimal listing objects (fast path)
+        for abs_url in links[:100]:
             beds = MIN_BEDS
             rent_pcm = MIN_RENT
             baths = max(MIN_BATHS, 1)
