@@ -26,7 +26,7 @@ ENABLE_ZOOPLA    = os.getenv("ENABLE_ZOOPLA", "true").lower() == "true"
 ENABLE_OTM       = os.getenv("ENABLE_OTM", "true").lower() == "true"
 ENABLE_SPAREROOM = os.getenv("ENABLE_SPAREROOM", "true").lower() == "true"
 
-# Execution order is fixed (no round robin rotation)
+# Fixed execution order (no rotation)
 SOURCES_ORDER = [s.strip().lower() for s in os.getenv(
     "SOURCES_ORDER",
     "rightmove,zoopla,onthemarket,spareroom"
@@ -39,7 +39,7 @@ LOCATION_IDS: Dict[str, str] = {
     "Bridgwater": "REGION^212",
 }
 
-# ======= HARDCODED SEARCH URLS (Option B) =======
+# ======= HARDCODED SEARCH URLS (Zoopla + SpareRoom) =======
 SEARCH_URLS: Dict[str, Dict[str, List[str] | str]] = {
     # Zoopla: 3–4 bed houses per area (your links)
     "zoopla": {
@@ -53,18 +53,13 @@ SEARCH_URLS: Dict[str, Dict[str, List[str] | str]] = {
             "https://www.zoopla.co.uk/to-rent/houses/schools/bridgewater-academy/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Bridgewater%20Academy%2C%20Somerset%2C%20TA6&search_source=to-rent"
         ],
     },
-    # SpareRoom: your saved-search links (whole property)
+    # SpareRoom: your saved-search links (whole property mode=list)
     "spareroom": {
         "Wirral": "https://www.spareroom.co.uk/flatshare/?search_id=1381769273&mode=list",
         "Bridgwater": "https://www.spareroom.co.uk/flatshare/?search_id=1381769450&mode=list",
         "Lincoln": "https://www.spareroom.co.uk/flatshare/?search_id=1381769591&mode=list",
     },
-    # OnTheMarket: (can uncomment/override later)
-    # "onthemarket": {
-    #     "Lincoln":    "https://www.onthemarket.com/to-rent/property/lincoln/?min-bedrooms=3&max-bedrooms=4&price-from=800&price-to=1500",
-    #     "Wirral":     "https://www.onthemarket.com/to-rent/property/wirral/?min-bedrooms=3&max-bedrooms=4&price-from=800&price-to=1500",
-    #     "Bridgwater": "https://www.onthemarket.com/to-rent/property/bridgwater/?min-bedrooms=3&max-bedrooms=4&price-from=800&price-to=1500",
-    # },
+    # OnTheMarket can be added here if you want explicit filters per area later.
 }
 
 # ========= Economics & filters =========
@@ -377,7 +372,6 @@ def build_zoopla_urls() -> Dict[str, List[str]]:
             for area in LOCATION_IDS.keys()}
 
 async def zoopla_launch_browser(pw):
-    import glob
     system_chromium = (
         next(iter(glob.glob("/root/.nix-profile/bin/chromium")), None) or
         next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium")), None) or
@@ -427,13 +421,14 @@ async def zoopla_accept_cookies(page):
                 await page.wait_for_timeout(400)
                 break
     except Exception:
+    # ignore cookie failures
         pass
 
 async def zoopla_extract_links_from_dom(page) -> List[str]:
-    """Collect listing links using several selector strategies."""
+    """Collect listing links using several selector strategies (fixed awaits)."""
     links: List[str] = []
 
-    # Strategy A: common card link testids
+    # Strategy A: common card link testids + hrefs
     try:
         sel_candidates = [
             "a[data-testid='listing-card-link']",
@@ -445,25 +440,33 @@ async def zoopla_extract_links_from_dom(page) -> List[str]:
         for sel in sel_candidates:
             if await page.locator(sel).count():
                 hrefs = await page.eval_on_selector_all(sel, "els => els.map(e => e.href)")
-                links.extend(hrefs or [])
+                if hrefs:
+                    links.extend(hrefs)
     except Exception:
         pass
 
-    # Strategy B: Next.js bootstrap JSON
+    # Strategy B: Next.js bootstrap JSON (proper await + try/except)
     try:
-        # Usually __NEXT_DATA__ exists; but also try window.__NEXT_DATA__
-        next_json = await page.eval_on_selector("script#__NEXT_DATA__", "el => el.textContent").catch(lambda _: None)
+        next_json = None
+        try:
+            next_json = await page.eval_on_selector("script#__NEXT_DATA__", "el => el.textContent")
+        except Exception:
+            pass
         if not next_json:
-            next_json = await page.evaluate(
-                "(() => (window.__NEXT_DATA__ ? JSON.stringify(window.__NEXT_DATA__) : null))()"
-            )
+            try:
+                next_json = await page.evaluate(
+                    "window.__NEXT_DATA__ ? JSON.stringify(window.__NEXT_DATA__) : null"
+                )
+            except Exception:
+                next_json = None
+
         if next_json:
-            # Try to extract paths that look like details routes
+            # relative paths
             for m in re.findall(r'"/to-rent/details/\\d+/?', next_json):
                 path = m.strip('"')
                 if path:
                     links.append("https://www.zoopla.co.uk" + path)
-            # Also check for explicit absolute urls
+            # absolute urls (escaped)
             for m in re.findall(r'https?:\\/\\/www\\.zoopla\\.co\\.uk\\/to-rent\\/details\\/\\d+\\/?', next_json):
                 links.append(m.replace("\\/", "/"))
     except Exception:
@@ -498,14 +501,11 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
     page.set_default_navigation_timeout(45000)
     await page.set_extra_http_headers({"Accept-Language": "en-GB,en;q=0.9"})
 
-    # Avoid blocking resources — Zoopla sometimes needs fonts/images for hydration side-effects
-    # (We previously aborted images/fonts; don’t do that here.)
-
     try:
         await page.goto(url, wait_until="domcontentloaded")
         await zoopla_accept_cookies(page)
 
-        # Wait for a results container to appear (several variants)
+        # Wait for possible results containers to appear
         selectors_to_wait = [
             "[data-testid='regular-listings']",
             "section[data-testid*='listings']",
@@ -521,7 +521,6 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
             except Exception:
                 continue
         if not waited:
-            # Give hydration a bit more time
             await page.wait_for_timeout(1500)
 
         # Try to reach end of list: scroll + click “show more”
@@ -540,19 +539,11 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
         print(f"🔎 Zoopla {area}: found {len(links)} listing links at {url}")
 
         if not links:
-            # Some filters show a banner first; poke the DOM once more
             await page.wait_for_timeout(1800)
             links = await zoopla_extract_links_from_dom(page)
             print(f"🔁 Zoopla {area}: fallback found {len(links)} links")
 
-        # If still nothing, bail gracefully
-        if not links:
-            print(f"🧮 Zoopla {area}: parsed 0 listings")
-            await page.close()
-            return []
-
         # Build minimal listings now (fast path).
-        # (Optional: add a second pass to open each detail page and extract price/beds precisely.)
         for abs_url in links[:80]:
             beds = MIN_BEDS
             rent_pcm = MIN_RENT
@@ -591,7 +582,6 @@ async def fetch_zoopla_playwright(context, url: str, area: str) -> List[Dict]:
 
     print(f"🧮 Zoopla {area}: parsed {len(listings)} listings")
     return listings
-
 
 # ========= OnTheMarket (requests) =========
 def build_otm_urls() -> Dict[str, str]:
@@ -694,7 +684,7 @@ def fetch_spareroom_from_url(url: str, area: str) -> List[Dict]:
 
         mb = re.search(r"(\d+)\s*bed", text.lower())
         if not mb:
-            continue
+            continue  # likely a room/HMO listing not whole property
         beds = int(mb.group(1))
         if beds < MIN_BEDS or beds > MAX_BEDS:
             continue
