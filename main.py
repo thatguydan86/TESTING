@@ -32,7 +32,9 @@ ENABLE_SPAREROOM   = os.getenv("ENABLE_SPAREROOM", "true").lower() == "true"
 
 SOURCES_ORDER = [s.strip().lower() for s in os.getenv(
     "SOURCES_ORDER", "rightmove,zoopla,onthemarket,spareroom"
-).split(",") if s.strip()]
+)
+                 
+                 .split(",") if s.strip()]
 
 # Residential proxy for Zoopla (Webshare etc.)
 ZOOPLA_PROXY = os.getenv("ZOOPLA_PROXY", "").strip()  # e.g. http://user:pass@p.webshare.io:80
