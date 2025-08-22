@@ -8,6 +8,7 @@ import re
 import hashlib
 import difflib
 import glob
+import shutil
 import requests
 from typing import Dict, List, Set, Optional, Tuple
 from urllib.parse import urljoin, quote_plus
@@ -606,31 +607,37 @@ async def run_once(seen_ids: Set[str], cross_registry: Dict[tuple, Dict]) -> Lis
                 new_listings.append(listing)
             time.sleep(1.0)
 
-    # ---- Zoopla (Playwright using Nix system browsers) ----
+    # ---- Zoopla (Playwright using Nix system browsers; Chromium-first) ----
     if "zoopla" in SOURCES_ORDER and ENABLE_ZOOPLA:
         print("\n🧭 Launching Playwright for Zoopla…")
         pw = await async_playwright().start()
         browser = None
         try:
-            # find Nix system browsers
-            system_firefox = next(iter(glob.glob("/nix/store/*-firefox-*/bin/firefox")), None)
-            system_chromium = (
-                next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium")), None)
-                or next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium-browser")), None)
-            )
+            # Prefer wrapped Chromium/Firefox on PATH, fallback to Nix store.
+            system_chromium = shutil.which("chromium") or shutil.which("chromium-browser")
+            if not system_chromium:
+                system_chromium = (
+                    next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium")), None)
+                    or next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium-browser")), None)
+                )
 
-            if system_firefox:
-                print(f"Using system Firefox: {system_firefox}")
-                browser = await pw.firefox.launch(headless=True, executable_path=system_firefox)
-            elif system_chromium:
+            system_firefox = shutil.which("firefox")
+            if not system_firefox:
+                candidates = [p for p in glob.glob("/nix/store/*-firefox-*/bin/firefox") if "unwrapped" not in p]
+                system_firefox = candidates[0] if candidates else None
+
+            if system_chromium:
                 print(f"Using system Chromium: {system_chromium}")
                 browser = await pw.chromium.launch(
                     headless=True,
                     executable_path=system_chromium,
-                    args=["--no-sandbox"]
+                    args=["--no-sandbox", "--disable-dev-shm-usage"]
                 )
+            elif system_firefox:
+                print(f"Using system Firefox: {system_firefox}")
+                browser = await pw.firefox.launch(headless=True, executable_path=system_firefox)
             else:
-                raise RuntimeError("No system Firefox/Chromium binaries found under /nix/store")
+                raise RuntimeError("No system Chromium/Firefox binaries found")
 
             context = await browser.new_context(locale="en-GB")
             urls = build_zoopla_urls()
