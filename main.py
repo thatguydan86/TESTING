@@ -8,7 +8,7 @@ import difflib
 import glob
 import requests
 from typing import Dict, List, Set, Optional, Tuple
-from urllib.parse import urljoin, quote_plus
+from urllib.parse import urljoin, quote_plus, urlparse
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
@@ -32,12 +32,11 @@ ENABLE_SPAREROOM   = os.getenv("ENABLE_SPAREROOM", "true").lower() == "true"
 
 SOURCES_ORDER = [s.strip().lower() for s in os.getenv(
     "SOURCES_ORDER", "rightmove,zoopla,onthemarket,spareroom"
-)
-                 
-                 .split(",") if s.strip()]
+).split(",") if s.strip()]
 
 # Residential proxy for Zoopla (Webshare etc.)
-ZOOPLA_PROXY = os.getenv("ZOOPLA_PROXY", "").strip()  # e.g. http://user:pass@p.webshare.io:80
+# e.g. http://user:pass@p.webshare.io:80
+ZOOPLA_PROXY = os.getenv("ZOOPLA_PROXY", "").strip()
 
 # Jitter buffer (KEEPING THIS PER YOUR REQUEST)
 SEND_JITTER_RANGE_MS = (120, 420)  # small random delay before POSTing leads (helps rate limits)
@@ -402,6 +401,8 @@ CHROMIUM_ARGS = [
     "--disable-renderer-backgrounding",
     "--metrics-recording-only",
     "--force-color-profile=srgb",
+    "--no-zygote",
+    "--disable-software-rasterizer",
 ]
 
 def build_zoopla_urls() -> Dict[str, str]:
@@ -410,6 +411,24 @@ def build_zoopla_urls() -> Dict[str, str]:
         return cfg
     return {area: f"https://www.zoopla.co.uk/to-rent/property/{area.lower().replace(' ', '-')}/"
             for area in LOCATION_IDS.keys()}
+
+def _parse_proxy(url_str: str) -> Optional[Dict[str, str]]:
+    """
+    Convert "http://user:pass@host:port" -> {"server": "http://host:port", "username": "...", "password": "..."}
+    """
+    if not url_str:
+        return None
+    try:
+        u = urlparse(url_str)
+        server = f"{u.scheme}://{u.hostname}:{u.port or 80}"
+        out = {"server": server}
+        if u.username:
+            out["username"] = u.username
+        if u.password:
+            out["password"] = u.password
+        return out
+    except Exception:
+        return {"server": url_str}
 
 async def _new_browser_context(pw, use_mobile: bool):
     # Prefer Nix system chromium if present
@@ -434,12 +453,19 @@ async def _new_browser_context(pw, use_mobile: bool):
         "user_agent": (MOBILE_UA if use_mobile else random.choice(UA_POOL)),
     }
 
-    # Attach proxy (browser-context level)
+    # Attach proxy (browser-context level) with parsed creds if present
     if ZOOPLA_PROXY:
-        context_kwargs["proxy"] = {"server": ZOOPLA_PROXY}
-        print(f"🔗 Using residential proxy for Zoopla ({ZOOPLA_PROXY}).")
+        parsed = _parse_proxy(ZOOPLA_PROXY)
+        if parsed:
+            context_kwargs["proxy"] = parsed
+        print(f"🔗 Using residential proxy for Zoopla ({parsed.get('server','') if parsed else ZOOPLA_PROXY}).")
 
     context = await browser.new_context(**context_kwargs)
+
+    # Harden timeouts at the context level
+    context.set_default_navigation_timeout(200_000)
+    context.set_default_timeout(90_000)
+
     return browser, context
 
 async def _page_links_from_html(page) -> List[str]:
@@ -455,7 +481,7 @@ async def _page_links_from_html(page) -> List[str]:
     # Dedup while preserving order
     seen, deduped = set(), []
     for u in out:
-        if u in seen: 
+        if u in seen:
             continue
         seen.add(u)
         deduped.append(u)
@@ -467,6 +493,8 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
     async with async_playwright() as pw:
         for attempt in range(1, 3 + 1):
             use_mobile = (attempt == 3)  # try mobile on final attempt
+            browser = None
+            context = None
             try:
                 browser, context = await _new_browser_context(pw, use_mobile=use_mobile)
 
@@ -485,7 +513,12 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
                 goto_url = url if not use_mobile else url.replace("https://www.zoopla.co.uk", "https://m.zoopla.co.uk")
                 print(f"\n📍 [Zoopla] {area} → {goto_url}")
 
-                await page.goto(goto_url, wait_until="domcontentloaded", timeout=120_000, referer="https://www.google.com/")
+                await page.goto(
+                    goto_url,
+                    wait_until="domcontentloaded",
+                    timeout=200_000,
+                    referer="https://www.google.com/",
+                )
 
                 # Close popups/cookies if we can (best-effort)
                 for sel in ["button[aria-label='Accept all']", "button:has-text('Accept all')"]:
@@ -502,27 +535,23 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
                 else:
                     if not links:
                         print("🔎 Zoopla PW found 0 links")
-                    # map links to minimal listings using heuristics (we’ll enrich from card text)
+                    # Map links to minimal listings using heuristics (fallbacks keep resilient)
+                    phtml = await page.content()
+                    soup = BeautifulSoup(phtml, "lxml")
                     for link in links:
-                        # attempt to derive beds / price from visible text around anchors
-                        # (keep resilient: fallback to MIN_* defaults)
-                        phtml = await page.content()
-                        soup = BeautifulSoup(phtml, "lxml")
-                        card = soup.find("a", href=lambda h: h and link.split("zoopla.co.uk")[-1] in h)
+                        node = soup.find("a", href=lambda h: h and link.split("zoopla.co.uk")[-1] in h)
                         text = ""
-                        if card:
-                            text = card.get_text(" ", strip=True).lower()
-                            parent = card.find_parent()
+                        if node:
+                            text = node.get_text(" ", strip=True).lower()
+                            parent = node.find_parent()
                             if parent:
                                 text = (parent.get_text(" ", strip=True) or "").lower()
 
-                        # price
                         mprice = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per month|per week)", text)
                         price_txt = mprice.group(0) if mprice else ""
                         amt, freq = parse_price_text(price_txt)
                         rent_pcm = to_pcm(amt, freq) if amt else None
 
-                        # beds
                         mb = re.search(r"(\d+)\s*bed", text)
                         beds = int(mb.group(1)) if mb else MIN_BEDS
 
@@ -569,11 +598,13 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
             except Exception as e:
                 print(f"⚠️ Zoopla attempt {attempt}/3 failed: {e}")
                 try:
-                    await context.close()
+                    if context:
+                        await context.close()
                 except:
                     pass
                 try:
-                    await browser.close()
+                    if browser:
+                        await browser.close()
                 except:
                     pass
 
