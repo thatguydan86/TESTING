@@ -31,10 +31,7 @@ ENABLE_ZOOPLA      = os.getenv("ENABLE_ZOOPLA", "true").lower() == "true"
 ENABLE_OTM         = os.getenv("ENABLE_OTM", "true").lower() == "true"
 ENABLE_SPAREROOM   = os.getenv("ENABLE_SPAREROOM", "true").lower() == "true"
 
-SOURCES_ORDER = [s.strip().lower() for s in os.getenv(
- 
-    "SOURCES_ORDER", "rightmove,zoopla,onthemarket,spareroom"
-).split(",") if s.strip()]
+SOURCES_ORDER = [s.strip().lower() for s in os.getenv("SOURCES_ORDER", "rightmove,zoopla,onthemarket,spareroom").split(",") if s.strip()]
 
 # Residential proxy for Zoopla (Webshare etc.)
 # e.g. http://user:pass@p.webshare.io:80
@@ -48,7 +45,7 @@ LOCATION_IDS: Dict[str, str] = {
     "Lincoln": "REGION^804",
     "Wirral": "REGION^93365",
     "Bridgwater": "REGION^212",
-}
+    }
 
 # Explicit source URLs
 SEARCH_URLS: Dict[str, Dict[str, str]] = {
@@ -64,10 +61,9 @@ SEARCH_URLS: Dict[str, Dict[str, str]] = {
         "Wirral":     "https://www.zoopla.co.uk/to-rent/houses/merseyside/wirral/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&price_frequency=per_month&price_max=1250&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Wirral%2C%20Merseyside&search_source=to-rent",
         "Bridgwater": "https://www.zoopla.co.uk/to-rent/houses/schools/bridgewater-academy/?beds_max=4&beds_min=3&is_retirement_home=false&is_shared_accommodation=false&is_student_accommodation=false&property_sub_type=semi_detached&property_sub_type=detached&property_sub_type=terraced&q=Bridgewater%20Academy%2C%20Somerset%2C%20TA6&search_source=to-rent",
     }
-}
+    }
 
-# Eco
-nomics & filters
+# Economics & filters
 MIN_BEDS = int(os.getenv("MIN_BEDS", "3"))
 MAX_BEDS = int(os.getenv("MAX_BEDS", "4"))
 MIN_BATHS = int(os.getenv("MIN_BATHS", "1"))
@@ -81,19 +77,19 @@ BILLS_PER_AREA: Dict[str, Dict[int, int]] = {
     "Lincoln": {3: 520, 4: 580},
     "Wirral": {3: 540, 4: 620},
     "Bridgwater": {3: 530, 4: 600},
-}
+    }
 
 NIGHTLY_RATES: Dict[str, Dict[int, int]] = {
     "Lincoln": {3: 150, 4: 178},
     "Wirral": {3: 165, 4: 196},
     "Bridgwater": {3: 170, 4: 205},
-}
+    }
 
 OCCUPANCY: Dict[str, Dict[int, float]] = {
     "Lincoln": {3: 0.65, 4: 0.66},
     "Wirral": {3: 0.67, 4: 0.68},
     "Bridgwater": {3: 0.66, 4: 0.67},
-}
+    }
 
 # Requests session & pacing
 REQUEST_TIMEOUT = 30
@@ -205,7 +201,7 @@ ABBR = {
     "close": "cl", "cl.": "cl",
     "court": "ct", "ct.": "ct",
     "terrace": "ter", "terr.": "ter",
-}
+    }
 
 def normalize_street(s: str) -> str:
     if not s:
@@ -375,7 +371,7 @@ def filter_rightmove(properties: List[Dict], area: str) -> List[Dict]:
                 "target_profit_70": GOOD_PROFIT_TARGET,
                 "score10": score10,
                 "rag": rag,
-            }
+    }
             results.append(listing)
         except Exception:
             continue
@@ -392,25 +388,25 @@ MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/
 # Overly aggressive or experimental flags can destabilise Chromium in containerised
 # environments like Railway. Simplify the argument list to a minimal, stable set.
 # These flags disable unnecessary features, reduce resource usage, and improve reliability.
-    CHROMIUM_ARGS = [
-        "--no-sandbox",                    # required for containers
-        "--disable-dev-shm-usage",         # avoid /dev/shm usage
-        "--disable-gpu",                   # disable GPU acceleration
-        "--disable-software-rasterizer",   # avoid software rasteriser
-        "--disable-background-networking", # prevent background connections
-        "--disable-renderer-backgrounding",# prevent renderer throttling in background
-        "--disable-background-timer-throttling", # disable background timer throttling
-        "--mute-audio",                    # no need for audio
-        "--disable-extensions",            # disable extensions
-        "--hide-scrollbars",               # minor perf improvement
-        # Process & crash mitigation flags
-        "--single-process",               # run everything in a single process to avoid fork issues
-        "--no-zygote",                    # disable zygote for proxy stability
-        "--disable-ipc-flooding-protection", # remove IPC throttling which can crash on proxies
-        "--disable-features=BackForwardCache,AcceptCHFrame,OptimizationHints,site-per-process", # disable features that can cause crashes
-        # Stealth: disable some automation-detection blink features
-        "--disable-blink-features=AutomationControlled",
-    ]
+CHROMIUM_ARGS = [
+    "--no-sandbox",                    # required for containers
+    "--disable-dev-shm-usage",         # avoid /dev/shm usage
+    "--disable-gpu",                   # disable GPU acceleration
+    "--disable-software-rasterizer",   # avoid software rasteriser
+    "--disable-background-networking", # prevent background connections
+    "--disable-renderer-backgrounding",# prevent renderer throttling in background
+    "--disable-background-timer-throttling", # disable background timer throttling
+    "--mute-audio",                    # no need for audio
+    "--disable-extensions",            # disable extensions
+    "--hide-scrollbars",               # minor perf improvement
+    # Process & crash mitigation flags
+    "--single-process",               # run everything in a single process to avoid fork issues
+    "--no-zygote",                    # disable zygote for proxy stability
+    "--disable-ipc-flooding-protection", # remove IPC throttling which can crash on proxies
+    "--disable-features=BackForwardCache,AcceptCHFrame,OptimizationHints,site-per-process", # disable features that can cause crashes
+    # Stealth: disable some automation-detection blink features
+    "--disable-blink-features=AutomationControlled",
+]
 
 def build_zoopla_urls() -> Dict[str, str]:
     cfg = SEARCH_URLS.get("zoopla", {})
@@ -474,32 +470,35 @@ async def _new_browser_context(pw, use_mobile: bool):
         "Upgrade-Insecure-Requests": "1",
     }
 
-    # Do not manually inject Proxy-Authorization headers. Playwright will
-    # automatically handle proxy authentication when credentials are provided
-    # via the proxy configuration (see proxy_config above). Setting this header
-    # explicitly caused Chromium to mis-handle proxy settings on Railway and
-    # triggered net::ERR_INVALID_ARGUMENT. Leaving it unset allows Playwright
-    # to negotiate authentication correctly.
-
+    
+    # Build Proxy-Authorization header if proxy credentials are present.
+    # When a proxy string includes a username and password (e.g. user:pass@host:port),
+    # Playwright will not automatically add the Proxy‑Authorization header, which may
+    # cause 407 errors. We compute it manually here and include it in the headers.
+    auth_header: Optional[str] = None
+    if proxy_config:
+        username = proxy_config.get("username")
+        password = proxy_config.get("password")
+        if username and password:
+            creds = f"{username}:{password}".encode()
+            auth_header = "Basic " + base64.b64encode(creds).decode()
+    # Attach Proxy-Authorization header when present
+    if auth_header:
+        headers["Proxy-Authorization"] = auth_header
     
     context_kwargs = {
         "extra_http_headers": headers,
         "locale": "en-GB",
         "user_agent": (MOBILE_UA if use_mobile else random.choice(UA_POOL)),
     }
-
-    
-
-    # Do not attach the proxy at the context level. Supplying the proxy
-    # configuration at both the browser and context layers can trigger
-    # `ERR_INVALID_ARGUMENT` errors in Playwright/Chromium. When
-    # credentials are embedded in ZOOPLA_PROXY (user:pass@host:port), the
-    # browser-level proxy is sufficient for authentication. We still log
-    # which proxy server is in use for debugging purposes.
+    # Pass the proxy configuration to the context as well so that all requests
+    # (including those initiated by extensions and page scripts) go through the proxy.
     if proxy_config:
+        context_kwargs["proxy"] = proxy_config
         print(f"🔗 Using residential proxy for Zoopla ({proxy_config.get('server', '')}).")
-
+    
     context = await browser.new_context(**context_kwargs)
+
 
     # Stealth: override the navigator.webdriver property to prevent detection
     # This script runs in all pages created from this context.
@@ -759,7 +758,7 @@ async def fetch_zoopla_with_firefox(pw, url: str, area: str) -> List[Dict]:
     if ZOOPLA_PROXY:
         proxy_config = _parse_proxy(ZOOPLA_PROXY)
     browser = await pw.firefox.launch(headless=True, proxy=proxy_config)
-    headers = {a
+    headers = {
         "Accept-Language": "en-GB,en;q=0.9",
         "DNT": "1",
         "Referer": "https://www.google.com/",
