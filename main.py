@@ -390,20 +390,25 @@ MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/
 # Overly aggressive or experimental flags can destabilise Chromium in containerised
 # environments like Railway. Simplify the argument list to a minimal, stable set.
 # These flags disable unnecessary features, reduce resource usage, and improve reliability.
-CHROMIUM_ARGS = [
-    "--no-sandbox",                    # required for containers
-    "--disable-dev-shm-usage",         # avoid /dev/shm usage
-    "--disable-gpu",                   # disable GPU acceleration
-    "--disable-software-rasterizer",   # avoid software rasteriser
-    "--disable-background-networking", # prevent background connections
-    "--disable-renderer-backgrounding",# prevent renderer throttling in background
-    "--disable-background-timer-throttling", # disable background timer throttling
-    "--mute-audio",                    # no need for audio
-    "--disable-extensions",            # disable extensions
-    "--hide-scrollbars",               # minor perf improvement
-    # Stealth: disable some automation-detection blink features
-    "--disable-blink-features=AutomationControlled",
-]
+    CHROMIUM_ARGS = [
+        "--no-sandbox",                    # required for containers
+        "--disable-dev-shm-usage",         # avoid /dev/shm usage
+        "--disable-gpu",                   # disable GPU acceleration
+        "--disable-software-rasterizer",   # avoid software rasteriser
+        "--disable-background-networking", # prevent background connections
+        "--disable-renderer-backgrounding",# prevent renderer throttling in background
+        "--disable-background-timer-throttling", # disable background timer throttling
+        "--mute-audio",                    # no need for audio
+        "--disable-extensions",            # disable extensions
+        "--hide-scrollbars",               # minor perf improvement
+        # Process & crash mitigation flags
+        "--single-process",               # run everything in a single process to avoid fork issues
+        "--no-zygote",                    # disable zygote for proxy stability
+        "--disable-ipc-flooding-protection", # remove IPC throttling which can crash on proxies
+        "--disable-features=BackForwardCache,AcceptCHFrame,OptimizationHints,site-per-process", # disable features that can cause crashes
+        # Stealth: disable some automation-detection blink features
+        "--disable-blink-features=AutomationControlled",
+    ]
 
 def build_zoopla_urls() -> Dict[str, str]:
     cfg = SEARCH_URLS.get("zoopla", {})
