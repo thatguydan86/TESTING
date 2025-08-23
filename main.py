@@ -413,12 +413,14 @@ CHROMIUM_ARGS = [
     # Disable features that can cause tab processes to crash or navigate away
     # unexpectedly. See https://bugs.chromium.org/p/chromium/issues/detail?id=1324585
     "--disable-features=BackForwardCache,AcceptCHFrame,OptimizationHints,site-per-process",
-    # Run Chromium in a single process and disable additional security features.
-    # These flags help improve stability when running inside containerised environments
+    # Note: do not duplicate flags. The options above already disable back-forward
+    # cache and related features. Additional flags below further harden the
+    # environment without repeating the same directives.
+    # Run Chromium in a single process and disable IPC flooding protection. These
+    # flags help improve stability when running inside containerised environments
     # and reduce crashes encountered on Zoopla pages.
     "--single-process",
     "--disable-ipc-flooding-protection",
-    "--disable-features=BackForwardCache,AcceptCHFrame,OptimizationHints,site-per-process",
 ]
 
 def build_zoopla_urls() -> Dict[str, str]:
@@ -450,11 +452,31 @@ async def _new_browser_context(pw, use_mobile: bool):
     # Prefer Nix system chromium if present
     system_chromium = (next(iter(glob.glob("/nix/store/*-chromium-*/bin/chromium")), None)
                        or next(iter(glob.glob("/root/.nix-profile/bin/chromium*", )), None))
+    # Prepare proxy configuration if present. Passing the proxy to the browser
+    # launch helps ensure all HTTP(S) requests (including those made during
+    # browser start-up) are routed via the residential proxy. Without this,
+    # Playwright may attempt to connect directly during the initial handshake,
+    # which can lead to page crashes or 407 errors.
+    proxy_config: Optional[Dict[str, str]] = None
+    if ZOOPLA_PROXY:
+        parsed = _parse_proxy(ZOOPLA_PROXY)
+        if parsed:
+            proxy_config = parsed
+
     if system_chromium:
-        browser = await pw.chromium.launch(headless=True, executable_path=system_chromium, args=CHROMIUM_ARGS)
+        browser = await pw.chromium.launch(
+            headless=True,
+            executable_path=system_chromium,
+            args=CHROMIUM_ARGS,
+            proxy=proxy_config,
+        )
         print(f"Using system Chromium: {system_chromium}")
     else:
-        browser = await pw.chromium.launch(headless=True, args=CHROMIUM_ARGS)
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=CHROMIUM_ARGS,
+            proxy=proxy_config,
+        )
 
     headers = {
         "Accept-Language": "en-GB,en;q=0.9",
@@ -469,12 +491,18 @@ async def _new_browser_context(pw, use_mobile: bool):
         "user_agent": (MOBILE_UA if use_mobile else random.choice(UA_POOL)),
     }
 
-    # Attach proxy (browser-context level) with parsed creds if present
-    if ZOOPLA_PROXY:
-        parsed = _parse_proxy(ZOOPLA_PROXY)
-        if parsed:
-            context_kwargs["proxy"] = parsed
-        print(f"🔗 Using residential proxy for Zoopla ({parsed.get('server','') if parsed else ZOOPLA_PROXY}).")
+    # Attach proxy at context level as well. While the browser-level proxy
+    # configuration ensures traffic goes through the proxy from launch, the
+    # context-level proxy enables Playwright to handle authentication for HTTP
+    # proxies that require credentials. Without both levels, Playwright may
+    # prompt for credentials or fail silently.
+    if proxy_config:
+        context_kwargs["proxy"] = proxy_config
+        # Print out the proxy server being used; include only the server (host:port)
+        # and avoid constructing tuples which can cause formatting errors.
+        print(
+            f"🔗 Using residential proxy for Zoopla ({proxy_config.get('server', '')})."
+        )
 
     context = await browser.new_context(**context_kwargs)
 
