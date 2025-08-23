@@ -480,18 +480,14 @@ async def _new_browser_context(pw, use_mobile: bool):
         "user_agent": (MOBILE_UA if use_mobile else random.choice(UA_POOL)),
     }
 
-    # Attach proxy at context level as well. While the browser-level proxy
-    # configuration ensures traffic goes through the proxy from launch, the
-    # context-level proxy enables Playwright to handle authentication for HTTP
-    # proxies that require credentials. Without both levels, Playwright may
-    # prompt for credentials or fail silently.
+    # Do not attach the proxy at the context level. Supplying the proxy
+    # configuration at both the browser and context layers can trigger
+    # `ERR_INVALID_ARGUMENT` errors in Playwright/Chromium. When
+    # credentials are embedded in ZOOPLA_PROXY (user:pass@host:port), the
+    # browser-level proxy is sufficient for authentication. We still log
+    # which proxy server is in use for debugging purposes.
     if proxy_config:
-        context_kwargs["proxy"] = proxy_config
-        # Print out the proxy server being used; include only the server (host:port)
-        # and avoid constructing tuples which can cause formatting errors.
-        print(
-            f"🔗 Using residential proxy for Zoopla ({proxy_config.get('server', '')})."
-        )
+        print(f"🔗 Using residential proxy for Zoopla ({proxy_config.get('server', '')}).")
 
     context = await browser.new_context(**context_kwargs)
 
