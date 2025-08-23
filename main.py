@@ -403,6 +403,22 @@ CHROMIUM_ARGS = [
     "--force-color-profile=srgb",
     "--no-zygote",
     "--disable-software-rasterizer",
+    # Run all browser processes within a single OS process. This can improve stability
+    # within constrained container environments (Railway/Nix). See:
+    # https://github.com/microsoft/playwright/issues/5745
+    "--single-process",
+    # Disable Playwright/Chromium's IPC flooding protection. Without this flag, Playwright
+    # sometimes kills the renderer process when using a proxy or intercepting requests.
+    "--disable-ipc-flooding-protection",
+    # Disable features that can cause tab processes to crash or navigate away
+    # unexpectedly. See https://bugs.chromium.org/p/chromium/issues/detail?id=1324585
+    "--disable-features=BackForwardCache,AcceptCHFrame,OptimizationHints,site-per-process",
+    # Run Chromium in a single process and disable additional security features.
+    # These flags help improve stability when running inside containerised environments
+    # and reduce crashes encountered on Zoopla pages.
+    "--single-process",
+    "--disable-ipc-flooding-protection",
+    "--disable-features=BackForwardCache,AcceptCHFrame,OptimizationHints,site-per-process",
 ]
 
 def build_zoopla_urls() -> Dict[str, str]:
@@ -515,7 +531,10 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
 
                 await page.goto(
                     goto_url,
-                    wait_until="domcontentloaded",
+                    # Wait until the network is idle rather than only DOMContentLoaded.
+                    # Zoopla has heavy client-side scripts; waiting for networkidle ensures
+                    # the page has stabilised before attempting extraction.
+                    wait_until="networkidle",
                     timeout=200_000,
                     referer="https://www.google.com/",
                 )
