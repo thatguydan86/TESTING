@@ -529,57 +529,62 @@ async def _page_links_from_html(page) -> List[str]:
     return deduped[:60]
 
 async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
+    """
+    Attempt to scrape Zoopla listings using Playwright (Chromium). We perform up to
+    three attempts, using a mobile user-agent on the final try. If all
+    attempts fail (e.g. due to page crashes), we fall back to a simple
+    requests/BeautifulSoup HTML scraper that honours the proxy settings. This
+    ensures that even if the headless browser fails, we still attempt to
+    extract listings from the raw HTML.
+    """
     listings: List[Dict] = []
-
     async with async_playwright() as pw:
         for attempt in range(1, 3 + 1):
-            use_mobile = (attempt == 3)  # try mobile on final attempt
+            use_mobile = (attempt == 3)  # mobile UA on final attempt
             browser = None
             context = None
             try:
                 browser, context = await _new_browser_context(pw, use_mobile=use_mobile)
-
-                # New page each attempt + lightweight routing
+                # create a new page and block heavy assets
                 page = await context.new_page()
-
                 async def route_handler(route):
                     req_url = route.request.url
-                    if any(ext in req_url for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
-                                                      ".woff", ".woff2", ".ttf", ".otf", "fonts.", "analytics",
-                                                      "facebook", "doubleclick", "hotjar", "gtag")):
+                    if any(ext in req_url for ext in (
+                        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+                        ".woff", ".woff2", ".ttf", ".otf", "fonts.", "analytics",
+                        "facebook", "doubleclick", "hotjar", "gtag"
+                    )):
                         return await route.abort()
                     return await route.continue_()
                 await page.route("**/*", route_handler)
-
-                goto_url = url if not use_mobile else url.replace("https://www.zoopla.co.uk", "https://m.zoopla.co.uk")
+                # choose mobile site on final attempt
+                goto_url = url if not use_mobile else url.replace(
+                    "https://www.zoopla.co.uk", "https://m.zoopla.co.uk"
+                )
                 print(f"\n📍 [Zoopla] {area} → {goto_url}")
-
+                # navigate and wait for network to be idle
                 await page.goto(
                     goto_url,
-                    # Wait until the network is idle rather than only DOMContentLoaded.
-                    # Zoopla has heavy client-side scripts; waiting for networkidle ensures
-                    # the page has stabilised before attempting extraction.
                     wait_until="networkidle",
                     timeout=200_000,
                     referer="https://www.google.com/",
                 )
-
-                # Close popups/cookies if we can (best-effort)
+                # attempt to close cookie popups
                 for sel in ["button[aria-label='Accept all']", "button:has-text('Accept all')"]:
                     try:
                         btn = await page.query_selector(sel)
                         if btn:
                             await btn.click(timeout=1500)
-                    except:
+                    except Exception:
                         pass
-
+                # extract links from page content
                 links = await _page_links_from_html(page)
                 if not links and attempt < 3:
                     print("🔎 Zoopla PW found 0 links; retrying…")
                 else:
                     if not links:
                         print("🔎 Zoopla PW found 0 links")
-                    # Map links to minimal listings using heuristics (fallbacks keep resilient)
+                    # parse listing summaries from HTML
                     phtml = await page.content()
                     soup = BeautifulSoup(phtml, "lxml")
                     for link in links:
@@ -590,27 +595,24 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
                             parent = node.find_parent()
                             if parent:
                                 text = (parent.get_text(" ", strip=True) or "").lower()
-
                         mprice = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per month|per week)", text)
                         price_txt = mprice.group(0) if mprice else ""
                         amt, freq = parse_price_text(price_txt)
                         rent_pcm = to_pcm(amt, freq) if amt else None
-
                         mb = re.search(r"(\d+)\s*bed", text)
                         beds = int(mb.group(1)) if mb else MIN_BEDS
-
                         if beds < MIN_BEDS or beds > MAX_BEDS:
                             continue
                         if rent_pcm is not None and rent_pcm < MIN_RENT:
                             continue
                         rent_pcm = rent_pcm if rent_pcm is not None else MIN_RENT
                         baths = max(MIN_BATHS, 1)
-
                         p = calculate_profits(rent_pcm, area, beds)
                         p70 = p["profit_70"]
                         score10 = round(max(0, min(10, (p70 / GOOD_PROFIT_TARGET) * 10)), 1)
-                        rag = "🟢" if p70 >= GOOD_PROFIT_TARGET else ("🟡" if p70 >= GOOD_PROFIT_TARGET * 0.7 else "🔴")
-
+                        rag = "🟢" if p70 >= GOOD_PROFIT_TARGET else (
+                            "🟡" if p70 >= GOOD_PROFIT_TARGET * 0.7 else "🔴"
+                        )
                         listings.append({
                             "id": norm_id("zoopla", link),
                             "source": "zoopla",
@@ -631,34 +633,108 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
                             "score10": score10,
                             "rag": rag,
                         })
-
                     await context.close()
                     await browser.close()
-                    break  # done
-
+                    # if we've gathered any listings, break early
+                    if listings:
+                        return listings
+                    # otherwise continue to next attempt (links empty but final attempt)
                 await context.close()
                 await browser.close()
-
             except Exception as e:
-                # Log the failure for this attempt. A page crash or proxy error
-                # will be captured here. We explicitly avoid falling back to
-                # Firefox because the Railway image does not include it. Instead,
-                # we simply clean up and proceed to the next retry if available.
+                # Log failure and clean up before retrying
                 print(f"⚠️ Zoopla attempt {attempt}/3 failed: {e}")
                 try:
                     if context:
                         await context.close()
-                except:
+                except Exception:
                     pass
                 try:
                     if browser:
                         await browser.close()
-                except:
+                except Exception:
                     pass
-                # Continue to next attempt (if any). No Firefox fallback.
-                continue
+                continue  # retry
+    # All attempts exhausted; if no listings were found via Playwright, fall back
+    if not listings:
+        print("⚠️ Zoopla Playwright failed; falling back to HTML parser…")
+        return fetch_zoopla_html(url, area)
+    return listings
 
-        return listings
+def fetch_zoopla_html(url: str, area: str) -> List[Dict]:
+    """
+    Fallback Zoopla scraper using requests + BeautifulSoup. This function
+    fetches the HTML of the Zoopla search results page and extracts listing
+    links and basic information. It uses the same proxy credentials as the
+    Playwright scraper via the `_proxy_for_url` helper. Note: the HTML site
+    may not include all dynamic content, but it provides a safety net when
+    headless browser attempts crash.
+    """
+    results: List[Dict] = []
+    soup = get_soup(url)
+    if not soup:
+        return results
+    anchors = soup.find_all("a", href=True)
+    links = []
+    for a in anchors:
+        href = a["href"]
+        if "/to-rent/details/" in href or "/to-rent/property/" in href:
+            abs_url = href if href.startswith("http") else urljoin("https://www.zoopla.co.uk", href)
+            links.append(abs_url)
+    # deduplicate
+    seen: Set[str] = set()
+    deduped: List[str] = []
+    for u in links:
+        if u in seen:
+            continue
+        seen.add(u)
+        deduped.append(u)
+    # limit to 60 links as in Playwright version
+    for link in deduped[:60]:
+        # attempt to extract minimal info from the anchor's parent container
+        # We fetch each listing page quickly to gather price/beds; this may be
+        # expensive but ensures parity with Playwright output.
+        soup_prop = get_soup(link)
+        if not soup_prop:
+            continue
+        text = soup_prop.get_text(" ", strip=True).lower()
+        mprice = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per month|per week)", text)
+        price_txt = mprice.group(0) if mprice else ""
+        amt, freq = parse_price_text(price_txt)
+        rent_pcm = to_pcm(amt, freq) if amt else None
+        mb = re.search(r"(\d+)\s*bed", text)
+        beds = int(mb.group(1)) if mb else MIN_BEDS
+        if beds < MIN_BEDS or beds > MAX_BEDS:
+            continue
+        if rent_pcm is not None and rent_pcm < MIN_RENT:
+            continue
+        rent_pcm = rent_pcm if rent_pcm is not None else MIN_RENT
+        baths = max(MIN_BATHS, 1)
+        p = calculate_profits(rent_pcm, area, beds)
+        p70 = p["profit_70"]
+        score10 = round(max(0, min(10, (p70 / GOOD_PROFIT_TARGET) * 10)), 1)
+        rag = "🟢" if p70 >= GOOD_PROFIT_TARGET else ("🟡" if p70 >= GOOD_PROFIT_TARGET * 0.7 else "🔴")
+        results.append({
+            "id": norm_id("zoopla", link),
+            "source": "zoopla",
+            "area": area,
+            "address": "Unknown",
+            "rent_pcm": rent_pcm,
+            "bedrooms": beds,
+            "bathrooms": baths,
+            "propertySubType": "Property",
+            "url": link,
+            "night_rate": p["night_rate"],
+            "occ_rate": p["occ_rate"],
+            "bills": p["total_bills"],
+            "profit_50": p["profit_50"],
+            "profit_70": p70,
+            "profit_100": p["profit_100"],
+            "target_profit_70": GOOD_PROFIT_TARGET,
+            "score10": score10,
+            "rag": rag,
+        })
+    return results
 
 async def fetch_zoopla_with_firefox(pw, url: str, area: str) -> List[Dict]:
     """
