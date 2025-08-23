@@ -467,13 +467,12 @@ async def _new_browser_context(pw, use_mobile: bool):
         "Upgrade-Insecure-Requests": "1",
     }
 
-    # If the proxy requires authentication, add a Proxy-Authorization header using
-    # Basic auth encoding. Some proxies expect this header on each request in
-    # addition to Playwright's built-in proxy handling.
-    if proxy_config and "username" in proxy_config and "password" in proxy_config:
-        user_pass = f"{proxy_config['username']}:{proxy_config['password']}"
-        token = base64.b64encode(user_pass.encode()).decode()
-        headers["Proxy-Authorization"] = f"Basic {token}"
+    # Do not manually inject Proxy-Authorization headers. Playwright will
+    # automatically handle proxy authentication when credentials are provided
+    # via the proxy configuration (see proxy_config above). Setting this header
+    # explicitly caused Chromium to mis-handle proxy settings on Railway and
+    # triggered net::ERR_INVALID_ARGUMENT. Leaving it unset allows Playwright
+    # to negotiate authentication correctly.
 
     context_kwargs = {
         "extra_http_headers": headers,
@@ -641,6 +640,10 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
                 await browser.close()
 
             except Exception as e:
+                # Log the failure for this attempt. A page crash or proxy error
+                # will be captured here. We explicitly avoid falling back to
+                # Firefox because the Railway image does not include it. Instead,
+                # we simply clean up and proceed to the next retry if available.
                 print(f"⚠️ Zoopla attempt {attempt}/3 failed: {e}")
                 try:
                     if context:
@@ -652,15 +655,7 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
                         await browser.close()
                 except:
                     pass
-                # On the final Chromium attempt, fallback to Firefox
-                if attempt == 3:
-                    try:
-                        print("⚠️ Chromium attempts exhausted; falling back to Firefox…")
-                        listings_ff = await fetch_zoopla_with_firefox(pw, url, area)
-                        listings.extend(listings_ff)
-                    except Exception as ef:
-                        print(f"⚠️ Firefox fallback failed: {ef}")
-                # continue attempts if not final
+                # Continue to next attempt (if any). No Firefox fallback.
                 continue
 
         return listings
@@ -682,10 +677,10 @@ async def fetch_zoopla_with_firefox(pw, url: str, area: str) -> List[Dict]:
         "Referer": "https://www.google.com/",
         "Upgrade-Insecure-Requests": "1",
     }
-    if proxy_config and "username" in proxy_config and "password" in proxy_config:
-        user_pass = f"{proxy_config['username']}:{proxy_config['password']}"
-        token = base64.b64encode(user_pass.encode()).decode()
-        headers["Proxy-Authorization"] = f"Basic {token}"
+    # Do not manually set a Proxy-Authorization header. When credentials
+    # are supplied via the proxy configuration, Playwright will handle
+    # authentication automatically. Injecting this header can cause
+    # Chromium to misconfigure the proxy, so we avoid it here as well.
     context = await browser.new_context(
         extra_http_headers=headers,
         locale="en-GB",
