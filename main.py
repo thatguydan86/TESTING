@@ -32,6 +32,7 @@ ENABLE_OTM         = os.getenv("ENABLE_OTM", "true").lower() == "true"
 ENABLE_SPAREROOM   = os.getenv("ENABLE_SPAREROOM", "true").lower() == "true"
 
 SOURCES_ORDER = [s.strip().lower() for s in os.getenv(
+ 
     "SOURCES_ORDER", "rightmove,zoopla,onthemarket,spareroom"
 ).split(",") if s.strip()]
 
@@ -65,7 +66,8 @@ SEARCH_URLS: Dict[str, Dict[str, str]] = {
     }
 }
 
-# Economics & filters
+# Eco
+nomics & filters
 MIN_BEDS = int(os.getenv("MIN_BEDS", "3"))
 MAX_BEDS = int(os.getenv("MAX_BEDS", "4"))
 MIN_BATHS = int(os.getenv("MIN_BATHS", "1"))
@@ -479,11 +481,14 @@ async def _new_browser_context(pw, use_mobile: bool):
     # triggered net::ERR_INVALID_ARGUMENT. Leaving it unset allows Playwright
     # to negotiate authentication correctly.
 
+    
     context_kwargs = {
         "extra_http_headers": headers,
         "locale": "en-GB",
         "user_agent": (MOBILE_UA if use_mobile else random.choice(UA_POOL)),
     }
+
+    
 
     # Do not attach the proxy at the context level. Supplying the proxy
     # configuration at both the browser and context layers can trigger
@@ -549,6 +554,8 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
                 # create a new page and block heavy assets
                 page = await context.new_page()
                 async def route_handler(route):
+
+                    
                     req_url = route.request.url
                     if any(ext in req_url for ext in (
                         ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
@@ -584,6 +591,7 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
                     print("🔎 Zoopla PW found 0 links; retrying…")
                 else:
                     if not links:
+                     
                         print("🔎 Zoopla PW found 0 links")
                     # parse listing summaries from HTML
                     phtml = await page.content()
@@ -637,6 +645,7 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
                     await context.close()
                     await browser.close()
                     # if we've gathered any listings, break early
+                    
                     if listings:
                         return listings
                     # otherwise continue to next attempt (links empty but final attempt)
@@ -691,6 +700,7 @@ def fetch_zoopla_html(url: str, area: str) -> List[Dict]:
         seen.add(u)
         deduped.append(u)
     # limit to 60 links as in Playwright version
+    
     for link in deduped[:60]:
         # attempt to extract minimal info from the anchor's parent container
         # We fetch each listing page quickly to gather price/beds; this may be
@@ -700,7 +710,8 @@ def fetch_zoopla_html(url: str, area: str) -> List[Dict]:
             continue
         text = soup_prop.get_text(" ", strip=True).lower()
         mprice = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per month|per week)", text)
-        price_txt = mprice.group(0) if mprice else ""
+        price_txt = mprice.gro
+        up(0) if mprice else ""
         amt, freq = parse_price_text(price_txt)
         rent_pcm = to_pcm(amt, freq) if amt else None
         mb = re.search(r"(\d+)\s*bed", text)
@@ -748,7 +759,7 @@ async def fetch_zoopla_with_firefox(pw, url: str, area: str) -> List[Dict]:
     if ZOOPLA_PROXY:
         proxy_config = _parse_proxy(ZOOPLA_PROXY)
     browser = await pw.firefox.launch(headless=True, proxy=proxy_config)
-    headers = {
+    headers = {a
         "Accept-Language": "en-GB,en;q=0.9",
         "DNT": "1",
         "Referer": "https://www.google.com/",
