@@ -6,6 +6,7 @@ import re
 import hashlib
 import difflib
 import glob
+import base64
 import requests
 from typing import Dict, List, Set, Optional, Tuple
 from urllib.parse import urljoin, quote_plus, urlparse
@@ -383,44 +384,25 @@ def filter_rightmove(properties: List[Dict], area: str) -> List[Dict]:
 # --------------------------------------------------------------------------------------
 MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
 
+#
+# Stable Chromium launch arguments
+#
+# Overly aggressive or experimental flags can destabilise Chromium in containerised
+# environments like Railway. Simplify the argument list to a minimal, stable set.
+# These flags disable unnecessary features, reduce resource usage, and improve reliability.
 CHROMIUM_ARGS = [
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--no-first-run",
-    "--disable-extensions",
-    "--disable-accelerated-2d-canvas",
-    "--disable-features=Translate,MediaRouter,AutofillServerCommunication,OptimizationHints,InterestFeedContentSuggestions",
-    "--enable-automation",
-    "--password-store=basic",
-    "--mute-audio",
-    "--hide-scrollbars",
-    "--disable-background-networking",
-    "--disable-background-timer-throttling",
-    "--disable-renderer-backgrounding",
-    "--metrics-recording-only",
-    "--force-color-profile=srgb",
-    "--no-zygote",
-    "--disable-software-rasterizer",
-    # Run all browser processes within a single OS process. This can improve stability
-    # within constrained container environments (Railway/Nix). See:
-    # https://github.com/microsoft/playwright/issues/5745
-    "--single-process",
-    # Disable Playwright/Chromium's IPC flooding protection. Without this flag, Playwright
-    # sometimes kills the renderer process when using a proxy or intercepting requests.
-    "--disable-ipc-flooding-protection",
-    # Disable features that can cause tab processes to crash or navigate away
-    # unexpectedly. See https://bugs.chromium.org/p/chromium/issues/detail?id=1324585
-    "--disable-features=BackForwardCache,AcceptCHFrame,OptimizationHints,site-per-process",
-    # Note: do not duplicate flags. The options above already disable back-forward
-    # cache and related features. Additional flags below further harden the
-    # environment without repeating the same directives.
-    # Run Chromium in a single process and disable IPC flooding protection. These
-    # flags help improve stability when running inside containerised environments
-    # and reduce crashes encountered on Zoopla pages.
-    "--single-process",
-    "--disable-ipc-flooding-protection",
+    "--no-sandbox",                    # required for containers
+    "--disable-dev-shm-usage",         # avoid /dev/shm usage
+    "--disable-gpu",                   # disable GPU acceleration
+    "--disable-software-rasterizer",   # avoid software rasteriser
+    "--disable-background-networking", # prevent background connections
+    "--disable-renderer-backgrounding",# prevent renderer throttling in background
+    "--disable-background-timer-throttling", # disable background timer throttling
+    "--mute-audio",                    # no need for audio
+    "--disable-extensions",            # disable extensions
+    "--hide-scrollbars",               # minor perf improvement
+    # Stealth: disable some automation-detection blink features
+    "--disable-blink-features=AutomationControlled",
 ]
 
 def build_zoopla_urls() -> Dict[str, str]:
@@ -485,6 +467,14 @@ async def _new_browser_context(pw, use_mobile: bool):
         "Upgrade-Insecure-Requests": "1",
     }
 
+    # If the proxy requires authentication, add a Proxy-Authorization header using
+    # Basic auth encoding. Some proxies expect this header on each request in
+    # addition to Playwright's built-in proxy handling.
+    if proxy_config and "username" in proxy_config and "password" in proxy_config:
+        user_pass = f"{proxy_config['username']}:{proxy_config['password']}"
+        token = base64.b64encode(user_pass.encode()).decode()
+        headers["Proxy-Authorization"] = f"Basic {token}"
+
     context_kwargs = {
         "extra_http_headers": headers,
         "locale": "en-GB",
@@ -505,6 +495,14 @@ async def _new_browser_context(pw, use_mobile: bool):
         )
 
     context = await browser.new_context(**context_kwargs)
+
+    # Stealth: override the navigator.webdriver property to prevent detection
+    # This script runs in all pages created from this context.
+    try:
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+    except Exception:
+        # If adding the script fails (e.g. Playwright version difference), ignore silently.
+        pass
 
     # Harden timeouts at the context level
     context.set_default_navigation_timeout(200_000)
@@ -654,7 +652,120 @@ async def fetch_zoopla_playwright_hardened(url: str, area: str) -> List[Dict]:
                         await browser.close()
                 except:
                     pass
+                # On the final Chromium attempt, fallback to Firefox
+                if attempt == 3:
+                    try:
+                        print("⚠️ Chromium attempts exhausted; falling back to Firefox…")
+                        listings_ff = await fetch_zoopla_with_firefox(pw, url, area)
+                        listings.extend(listings_ff)
+                    except Exception as ef:
+                        print(f"⚠️ Firefox fallback failed: {ef}")
+                # continue attempts if not final
+                continue
 
+        return listings
+
+async def fetch_zoopla_with_firefox(pw, url: str, area: str) -> List[Dict]:
+    """
+    Fallback scraper using Firefox. This mirrors the hardened Chromium logic but
+    utilises the Firefox engine, which can succeed where Chromium fails.
+    """
+    listings: List[Dict] = []
+    # Launch Firefox with proxy if available
+    proxy_config: Optional[Dict[str, str]] = None
+    if ZOOPLA_PROXY:
+        proxy_config = _parse_proxy(ZOOPLA_PROXY)
+    browser = await pw.firefox.launch(headless=True, proxy=proxy_config)
+    headers = {
+        "Accept-Language": "en-GB,en;q=0.9",
+        "DNT": "1",
+        "Referer": "https://www.google.com/",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    if proxy_config and "username" in proxy_config and "password" in proxy_config:
+        user_pass = f"{proxy_config['username']}:{proxy_config['password']}"
+        token = base64.b64encode(user_pass.encode()).decode()
+        headers["Proxy-Authorization"] = f"Basic {token}"
+    context = await browser.new_context(
+        extra_http_headers=headers,
+        locale="en-GB",
+        user_agent=random.choice(UA_POOL),
+        proxy=proxy_config,
+    )
+    # Stealth for Firefox – Playwright sets navigator.webdriver automatically; override
+    try:
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+    except:
+        pass
+    page = await context.new_page()
+    async def route_handler(route):
+        req_url = route.request.url
+        if any(ext in req_url for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+                                          ".woff", ".woff2", ".ttf", ".otf", "fonts.", "analytics",
+                                          "facebook", "doubleclick", "hotjar", "gtag")):
+            return await route.abort()
+        return await route.continue_()
+    await page.route("**/*", route_handler)
+    try:
+        print(f"\n🦊 [Zoopla-FX] {area} → {url}")
+        await page.goto(url, wait_until="networkidle", timeout=200_000, referer="https://www.google.com/")
+        links = await _page_links_from_html(page)
+        if links:
+            phtml = await page.content()
+            soup = BeautifulSoup(phtml, "lxml")
+            for link in links:
+                node = soup.find("a", href=lambda h: h and link.split("zoopla.co.uk")[-1] in h)
+                text = ""
+                if node:
+                    text = node.get_text(" ", strip=True).lower()
+                    parent = node.find_parent()
+                    if parent:
+                        text = (parent.get_text(" ", strip=True) or "").lower()
+                mprice = re.search(r"£\s*\d[\d,]*\s*(pcm|pw|per month|per week)", text)
+                price_txt = mprice.group(0) if mprice else ""
+                amt, freq = parse_price_text(price_txt)
+                rent_pcm = to_pcm(amt, freq) if amt else None
+                mb = re.search(r"(\d+)\s*bed", text)
+                beds = int(mb.group(1)) if mb else MIN_BEDS
+                if beds < MIN_BEDS or beds > MAX_BEDS:
+                    continue
+                if rent_pcm is not None and rent_pcm < MIN_RENT:
+                    continue
+                rent_pcm = rent_pcm if rent_pcm is not None else MIN_RENT
+                baths = max(MIN_BATHS, 1)
+                p = calculate_profits(rent_pcm, area, beds)
+                p70 = p["profit_70"]
+                score10 = round(max(0, min(10, (p70 / GOOD_PROFIT_TARGET) * 10)), 1)
+                rag = "" if p70 >= GOOD_PROFIT_TARGET else ("" if p70 >= GOOD_PROFIT_TARGET * 0.7 else "")
+                listings.append({
+                    "id": norm_id("zoopla", link),
+                    "source": "zoopla",
+                    "area": area,
+                    "address": "Unknown",
+                    "rent_pcm": rent_pcm,
+                    "bedrooms": beds,
+                    "bathrooms": baths,
+                    "propertySubType": "Property",
+                    "url": link,
+                    "night_rate": p["night_rate"],
+                    "occ_rate": p["occ_rate"],
+                    "bills": p["total_bills"],
+                    "profit_50": p["profit_50"],
+                    "profit_70": p70,
+                    "profit_100": p["profit_100"],
+                    "target_profit_70": GOOD_PROFIT_TARGET,
+                    "score10": score10,
+                    "rag": rag,
+                })
+    finally:
+        try:
+            await context.close()
+        except:
+            pass
+        try:
+            await browser.close()
+        except:
+            pass
     return listings
 
 # --------------------------------------------------------------------------------------
