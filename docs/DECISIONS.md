@@ -12,3 +12,5 @@
 - Buffer incomplete or failed listings to `out/zoopla.jsonl`; send complete listings to `MAKE_WEBHOOK_URL` if provided.
 - Track metrics (attempts, proxy mode counts, goto errors, 403 count, listings found and complete, avg_ms per listing) and print a final summary line.
 - Use `tools/log_watch.py` to scan CI and Railway logs for errors; CI runs log_watch after deploy and fails the job on blocking errors.
+
+- Ensure final summary line 'ZP_RUN_COMPLETE ✅ listings=<n> complete=<n> failed=<n> avg_ms=<n>' is printed for all code paths; moved summary print before return in fallback.
