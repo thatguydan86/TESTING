@@ -2,6 +2,5 @@
 
 State: SCRAPER WIP
 
-Added: search and listing fixtures (4 total), created JSON‑LD, search extraction, and integration tests, and implemented a Playwright scraper skeleton in `scrapers/zoopla/main.py` with JSON‑LD parsing and local fixture fallback.
-
-Next: Implement quotas, retries, random delays, and dedupe/schema validation in the scraper. Integrate proxy handling, backoff logic, and webhook posting. Update tests and Dockerfile as needed, and run CI to validate. Once tests pass, perform live integration runs and tune until quality thresholds are met.
+Added: search and listing fixtures (4 total), unit and integration tests, implemented a Playwright scraper skeleton with JSON-LD parsing and local fixture fallback, and added webhook emission with buffer fallback and an entrypoint for live vs fixture runs.
+Next: Implement quotas, retry/backoff logic on 403/429, randomized delays, and full schema validation in the scraper. Add dedupe and webhook posting integration, structured logging with summary, and proxy handling. Update tests and Dockerfile as needed, and run CI. Once tests pass, perform live integration runs and tune until quality thresholds are met.
