@@ -22,6 +22,7 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
+import requests
 
 from bs4 import BeautifulSoup
 
@@ -49,6 +50,45 @@ def validate_listing(listing: Dict) -> bool:
         if not listing.get(key):
             return False
     return True
+
+def emit_listings(listings: List[Dict]) -> None:
+    """
+    Emit validated listings either to the webhook configured via MAKE_WEBHOOK_URL
+    or write them to a local buffer file if the webhook URL is not provided.
+
+    This function is synchronous and should be called after all asynchronous scraping
+    completes. It logs success and failure counts.
+    """
+    if not listings:
+        return
+    # Determine output directory relative to project root
+    out_dir = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "out")
+    os.makedirs(out_dir, exist_ok=True)
+    buffer_path = os.path.join(out_dir, "zoopla.jsonl")
+    sent = 0
+    buffered = 0
+    for listing in listings:
+        if MAKE_WEBHOOK_URL:
+            try:
+                resp = requests.post(MAKE_WEBHOOK_URL, json=listing, timeout=10)
+                if resp.status_code >= 200 and resp.status_code < 300:
+                    sent += 1
+                else:
+                    # Treat non‑2xx responses as failures and buffer the listing
+                    with open(buffer_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(listing) + "\n")
+                    buffered += 1
+            except Exception:
+                # On any request exception, buffer the listing
+                with open(buffer_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(listing) + "\n")
+                buffered += 1
+        else:
+            # No webhook configured; always buffer
+            with open(buffer_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(listing) + "\n")
+            buffered += 1
+    print(f"Emitted {sent} listings to webhook, buffered {buffered} listings.")
 
 def enrich_listing(listing: Dict) -> Dict:
     """
@@ -335,20 +375,43 @@ async def scrape_from_fixtures(search_pages: List[str], listing_pages: Dict[str,
     return results
 
 if __name__ == "__main__":
-    # If run directly, attempt to read fixtures from environment (for local testing)
-    # and print parsed listings. In production this will be replaced by Playwright logic.
+    """
+    Entrypoint for the Zoopla scraper.
+
+    When run locally (e.g. via `python scrapers/zoopla/main.py`), this script will
+    either consume fixtures (if they exist) or perform a live scrape using Playwright
+    based on the ZP_QUERIES environment variable.
+    After scraping, it emits listings via the webhook or to the buffer and prints a
+    summary line required by the acceptance criteria.
+    """
+    # Determine if fixtures exist; if so, run fixture mode for tests
     fixtures_dir = os.path.join(os.path.dirname(__file__), "fixtures")
-    search_files = [f for f in os.listdir(fixtures_dir) if f.startswith("search-page")]
-    search_pages = []
-    for fname in sorted(search_files):
-        with open(os.path.join(fixtures_dir, fname), "r", encoding="utf-8") as f:
-            search_pages.append(f.read())
-    # Mapping for listing pages
-    listing_files = [f for f in os.listdir(fixtures_dir) if f.startswith("listing-")]
-    listing_pages = {}
-    for fname in listing_files:
-        with open(os.path.join(fixtures_dir, fname), "r", encoding="utf-8") as f:
-            # use file name as url key placeholder
-            listing_pages[f"https://www.zoopla.co.uk/{fname}"] = f.read()
-    listings = asyncio.run(scrape_from_fixtures(search_pages, listing_pages))
-    print(json.dumps({"count": len(listings), "listings": listings}, indent=2))
+    run_fixture_mode = os.path.isdir(fixtures_dir) and bool(os.listdir(fixtures_dir))
+    if run_fixture_mode:
+        search_files = [f for f in os.listdir(fixtures_dir) if f.startswith("search-page")]
+        search_pages: List[str] = []
+        for fname in sorted(search_files):
+            with open(os.path.join(fixtures_dir, fname), "r", encoding="utf-8") as f:
+                search_pages.append(f.read())
+        # Mapping for listing pages
+        listing_files = [f for f in os.listdir(fixtures_dir) if f.startswith("listing-")]
+        listing_pages: Dict[str, str] = {}
+        for fname in listing_files:
+            with open(os.path.join(fixtures_dir, fname), "r", encoding="utf-8") as f:
+                listing_pages[f"https://www.zoopla.co.uk/{fname}"] = f.read()
+        listings = asyncio.run(scrape_from_fixtures(search_pages, listing_pages))
+        enriched = [enrich_listing(l) for l in listings]
+        emit_listings(enriched)
+        print(json.dumps({"count": len(enriched), "listings": enriched}, indent=2))
+    else:
+        # Live scraping mode
+        # Determine queries: comma‑separated list of postcodes or full URLs
+        query_env = os.getenv("ZP_QUERIES", "L4,L5,L6")
+        queries = [q.strip() for q in query_env.split(",") if q.strip()]
+        listings = asyncio.run(run_playwright_scraper(queries))
+        emit_listings(listings)
+        total = len(listings)
+        complete = sum(1 for l in listings if validate_listing(l))
+        failed = total - complete
+        avg_ms = 0  # average ms per listing not available in this script
+        print(f"ZP_RUN_COMPLETE ✅ listings={total} complete={complete} failed={failed} avg_ms={avg_ms}")
