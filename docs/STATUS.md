@@ -1,3 +1,4 @@
+2025-08-28 14:19 — Heartbeat/resume loop; continuing error-driven loop.
 2025-08-28 14:22 — Heartbeat/resume loop; continuing error-driven loop.
 
 2025-08-28 13:52 — Heartbeat/resume loop; no new progress since last check. Starting error-driven loop.
