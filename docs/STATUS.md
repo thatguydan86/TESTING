@@ -1,5 +1,7 @@
 # Zoopla Hardening — Status
 
-State: INIT
+State: SETUP
 
-Next: Add fixtures, write JSON-LD + search extraction tests, implement parser, wire CI deploy.
+Added: search and listing fixtures (4 total) and created tests for JSON-LD parsing, search extraction, and basic integration.
+
+Next: Implement the main Zoopla scraper in `scrapers/zoopla/main.py` with Playwright headless scraping, JSON-LD parsing and DOM fallbacks, quotas, retries, and dedupe/schema validation. Update Dockerfile and CI to run tests and deploy. Ensure tests pass and prepare for integration run.
