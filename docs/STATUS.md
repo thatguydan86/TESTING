@@ -1,6 +1,7 @@
 # Zoopla Hardening — Status
 
-State: SCRAPER WIP
+State: PROXY/NAV STABILIZATION
 
-Added: search and listing fixtures (4 total), unit and integration tests, implemented a Playwright scraper skeleton with JSON-LD parsing and local fixture fallback, and added webhook emission with buffer fallback and an entrypoint for live vs fixture runs.
-Next: Implement quotas, retry/backoff logic on 403/429, randomized delays, and full schema validation in the scraper. Add dedupe and webhook posting integration, structured logging with summary, and proxy handling. Update tests and Dockerfile as needed, and run CI. Once tests pass, perform live integration runs and tune until quality thresholds are met.
+Added: robust proxy parsing (parse_proxy) with credential and direct fallback; stable Playwright navigation via goto_stable; fallback to browser context requests to avoid 403s; mobile UA fallback for m.zoopla; random delays and quotas; metrics tracking with final summary line; proxy parser unit tests; tools/log_watch.py for CI/Railway log scanning; CI updated to run log_watch after deploy. Search and listing fixtures and unit/integration tests remain.
+
+Next: complete quota/backoff logic on 403/429 with proxy retry and direct fallback; refine mobile fallback and network idle detection; integrate dedupe and schema validation into the Playwright pipeline; improve structured logging metrics; run CI loop with log_watch until no blocking errors and parse-complete ≥95% and hard-failures ≤1%. Update docs and TODO accordingly.
