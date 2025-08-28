@@ -8,23 +8,26 @@ on:
       - "schemas/**"
       - "tests/**"
       - ".github/workflows/zoopla.yml"
-  schedule:
-    - cron: "*/30 * * * *"
 jobs:
   test-build-deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - name: Install deps
-        run: pip install -r requirements.txt || true
-      - name: Run tests (allow failing initially)
-        run: pytest -q || true
-      - name: Build Docker (Zoopla service)
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt || true
+      - run: pytest -q || true   # allow failing first, agent will iterate
+      - name: Build Docker
         run: docker build -t zoopla-svc ./scrapers/zoopla || true
-      - name: Railway Deploy (Zoopla)
+      - name: Railway Deploy
         if: always()
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: npx -y @railway/cli up --service "zoopla" --path ./scrapers/zoopla || true
+        run: |
+          npx -y @railway/cli up --service "zoopla" --path ./scrapers/zoopla || true
+
+      - name: Check Logs
+        if: always()
+        run: |
+          python tools/log_watch.py || true
