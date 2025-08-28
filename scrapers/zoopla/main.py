@@ -319,6 +319,8 @@ async def run_playwright_scraper(queries: List[str]) -> List[Dict]:
     # If Playwright isn't installed, skip and return empty results
     if async_playwright is None:
         print("Playwright is not available; skipping live scraping.")
+            print("ZP_RUN_COMPLETE ✅ listings=0 complete=0 failed=0 avg_ms=0")
+
         return results
              print("ZP_RUN_COMPLETE ✅ listings=0 complete=0 failed=0 avg_ms=0")
      
