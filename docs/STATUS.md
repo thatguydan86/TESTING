@@ -1,3 +1,5 @@
+2025-08-28 13:52 — Heartbeat/resume loop; no new progress since last check. Starting error-driven loop.
+
 # Zoopla Hardening — Status
 
 State: PROXY/NAV STABILIZATION
