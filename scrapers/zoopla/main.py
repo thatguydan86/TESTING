@@ -320,6 +320,8 @@ async def run_playwright_scraper(queries: List[str]) -> List[Dict]:
     if async_playwright is None:
         print("Playwright is not available; skipping live scraping.")
         return results
+             print("ZP_RUN_COMPLETE ✅ listings=0 complete=0 failed=0 avg_ms=0")
+     
     # Metrics tracking
     total_attempts = 0
     proxy_mode_counts = {"proxy": 0, "direct": 0}
