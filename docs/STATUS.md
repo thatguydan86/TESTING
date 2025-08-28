@@ -1,7 +1,7 @@
 # Zoopla Hardening — Status
 
-State: SETUP
+State: SCRAPER WIP
 
-Added: search and listing fixtures (4 total) and created tests for JSON-LD parsing, search extraction, and basic integration.
+Added: search and listing fixtures (4 total), created JSON‑LD, search extraction, and integration tests, and implemented a Playwright scraper skeleton in `scrapers/zoopla/main.py` with JSON‑LD parsing and local fixture fallback.
 
-Next: Implement the main Zoopla scraper in `scrapers/zoopla/main.py` with Playwright headless scraping, JSON-LD parsing and DOM fallbacks, quotas, retries, and dedupe/schema validation. Update Dockerfile and CI to run tests and deploy. Ensure tests pass and prepare for integration run.
+Next: Implement quotas, retries, random delays, and dedupe/schema validation in the scraper. Integrate proxy handling, backoff logic, and webhook posting. Update tests and Dockerfile as needed, and run CI to validate. Once tests pass, perform live integration runs and tune until quality thresholds are met.
