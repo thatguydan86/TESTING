@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "source": {"type": "string"},
+    "address": {"type": "string"},
+    "postcode": {"type": "string"},
+    "beds": {"type": "integer"},
+    "rent_pcm": {"type": "integer"},
+    "url": {"type": "string"},
+    "images": {"type": "array", "items": {"type": "string"}},
+    "scraped_at": {"type": "string"},
+    "agent_name": {"type": "string"},
+    "raw_id": {"type": "string"}
+  },
+  "required": ["source", "address", "postcode", "beds", "rent_pcm", "url", "scraped_at"],
+  "additionalProperties": true
+}
